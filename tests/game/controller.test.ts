@@ -7,7 +7,7 @@ import { applyAction, chooseAiAction, type GameEvent, type GameState, type Playe
 import type { AudioEngine } from '../../src/audio/types';
 import type { BoardHighlights, BoardView, PlayEventOptions, TerritoryPointerInfo } from '../../src/render/BoardView';
 import { createController, type GameController } from '../../src/game/controller';
-import { memoryKV, SAVE_KEY } from '../../src/game/storage';
+import { memoryKV, SAVE_KEY, SETTINGS_KEY } from '../../src/game/storage';
 import { eventDurationMs, scaledDuration } from '../../src/game/timingModel';
 import { board as fixture } from './fixtures';
 
@@ -100,6 +100,9 @@ const clock = {
 };
 
 function make(kv = memoryKV()) {
+  // These flows hand the device between two humans without the pass-the-cup cover (on by default since
+  // settings v5): switched off, as a player can.
+  if (!kv.get(SETTINGS_KEY)) kv.set(SETTINGS_KEY, JSON.stringify({ hideCardsBetweenTurns: false, v: 5 }));
   const fb = fakeBoard();
   const c = createController({ board: fb.board, audio: silentAudio, storage: kv, clock, dom: false, prefersReducedMotion: () => false });
   return { c, fb, kv };

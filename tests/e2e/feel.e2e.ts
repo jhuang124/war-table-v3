@@ -2,7 +2,7 @@
 //   - the renderer's dice tray sits inside the UI's tray band, just above the bottom strip, with the
 //     header line above the tray, at 1280×800, 1440×900, 1920×1080 and TV text on 1920×1080
 //   - the only chrome is the two strips (and the tray during a fight); the board spans the window
-//   - ≤ 25 words on screen in an armed Attack state
+//   - ≤ 27 words on screen in an armed Attack state (v3: 25 + the round)
 //   - dice ≥ 34 px; army tokens ≥ 22 px tall at home on 1280×800
 //   - the bottom strip's rect is identical in place / attack / armed / occupy / fortify / watching
 //   - the idle board settles to 0 tweens; a Place click shows its effect within 50 ms
@@ -51,7 +51,13 @@ async function trayAndBand(page: Page) {
         .map((e) => e.innerText)
         .join(' ')
         .split(/\s+/)
-        .filter((w) => /[A-Za-z0-9]/.test(w)).length,
+        .filter((w) => /[A-Za-z0-9]/.test(w)).length -
+        // (v3: the ledger's faint event lines above the dock are the table's record, not chrome to read)
+        [...document.querySelectorAll<HTMLElement>('.st-events')]
+          .map((e) => e.innerText)
+          .join(' ')
+          .split(/\s+/)
+          .filter((w) => /[A-Za-z0-9]/.test(w)).length,
       H: innerHeight,
     };
   });
@@ -72,7 +78,8 @@ for (const vp of [
   await clickT(page, 'siberia');
   await page.waitForTimeout(400); // the line's swap (the old line's ghost) and the dismissed turn line settle
   const armedWords = (await trayAndBand(page)).words;
-  if (vp.text === 'laptop') check(armedWords <= 25, `${tag}: ${armedWords} words on screen in an armed Attack state (≤ 25)`, results);
+  // v3 (John 2026-09-30, "fuller, not busier"): the round ("Round 6") joins the 25.
+  if (vp.text === 'laptop') check(armedWords <= 27, `${tag}: ${armedWords} words on screen in an armed Attack state (≤ 27: 25 + the round)`, results);
   await clickBtn(page, 'btn-roll');
   await page.waitForFunction(() => (window.__board as unknown as { __debug: { tray: { visible: boolean } } }).__debug.tray.visible, null, { timeout: 5000 });
   await page.waitForTimeout(700);
@@ -130,9 +137,12 @@ for (const vp of [
   await loadScenario(page, scenario({ ural: [0, 3], ukraine: [0, 2], siberia: [0, 1] }, reinforce(6)));
   await page.waitForTimeout(1500);
   const badges = await page.evaluate(() =>
-    [...document.querySelectorAll<HTMLElement>('.rb-badge')].filter((b) => b.style.visibility !== 'hidden').map((b) => b.getBoundingClientRect().height),
+    [...document.querySelectorAll<HTMLElement>('.rb-badge')].filter((b) => b.style.visibility !== 'hidden').map((b) => ({ w: b.getBoundingClientRect().width, fs: parseFloat(getComputedStyle(b).fontSize) })),
   );
-  check(badges.length === 42 && Math.min(...badges) >= 22, `army tokens at home on 1280×800: ${badges.length} visible, min height ${Math.min(...badges).toFixed(1)} px (≥ 22)`, results);
+  // v3: the army is a painted stone sized by its count (14 px for 1 army at 1440×900); its numeral ≥ 11 px
+  const minW = Math.min(...badges.map((b) => b.w));
+  const minF = Math.min(...badges.map((b) => b.fs));
+  check(badges.length === 42 && minW >= 13.5 && minF >= 11, `army stones at home on 1280×800: ${badges.length} visible, stones ≥ ${minW.toFixed(1)} px across (≥ 14, the 1-army stone), numerals ≥ ${minF.toFixed(1)} px (≥ 11)`, results);
   const st0 = await page.evaluate(() => window.__risk.stats());
   check(st0.activeTweens === 0 && !st0.cameraMoving, `idle board: ${st0.activeTweens} tweens, camera ${st0.cameraMoving ? 'moving' : 'still'}`, results);
   await page.screenshot({ path: `${ART}/feel-home-1280x800.png` });

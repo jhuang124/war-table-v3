@@ -5,9 +5,14 @@
 // All colour math is in display (sRGB) space and written out as is (the materials are unlit and not
 // tone-mapped), so the palette's hexes land on screen exactly.
 import * as THREE from 'three';
+import { CONTINENT_TINTS } from '../shared/palette';
 import type { InkLayer } from './ink';
 import { GOLD, INK_BORDER, INK_COAST, IVORY, PAPER, PAPER_DEEP, PAPER_FIBRE, hexToRgb, unclaimedRgb, type RGB } from './util';
 
+/** The continent outline (PLAN §2: the heaviest of the three line weights), a cooler silver than the coasts. */
+export const CONT_LINE = '#c8ced8';
+/** The continents' paper tints: src/shared/palette.ts CONTINENT_TINTS. */
+export const CONT_TINTS = CONTINENT_TINTS;
 const v3 = (hex: string | RGB) => {
   const c = typeof hex === 'string' ? hexToRgb(hex) : hex;
   return new THREE.Vector3(c[0], c[1], c[2]);
@@ -45,8 +50,16 @@ export interface SharedUniforms {
   uLiftB: { value: THREE.Vector2 };
   /** The turn "breath": washes dim 8 % at 1. */
   uBreath: { value: number };
-  /** Continent coast tint: colour per continent (CONTINENT_IDS order). */
+  /** A held continent's outline ink: colour per continent (CONTINENT_IDS order). */
   uContColor: { value: THREE.Vector3[] };
+  /** The printed continents (ink.ts buildContinents): R outline distance, G own continent, B the outline's. */
+  uCont: { value: THREE.Texture };
+  /** The continent outline's silver (unheld). */
+  uContLine: { value: THREE.Vector3 };
+  /** Each continent's paper tint (its halo of sea), CONTINENT_IDS order. */
+  uContTint: { value: THREE.Vector3[] };
+  /** The outline's half-width, board units (set on layout: a fixed weight in screen px at the home view). */
+  uContW: { value: number };
   /** Continent sweep: (centre bx, centre by, progress 0..1 clockwise from north, amount 0..1). */
   uContSweep: { value: THREE.Vector4[] };
   // --- the pigment maps (docs/INK2.md §4.2), driven by the ink layer's texture ladder -------------------
@@ -110,6 +123,10 @@ export function makeSharedUniforms(ink: InkLayer, boardW: number, boardH: number
     uLiftB: { value: new THREE.Vector2(0, 0) },
     uBreath: { value: 0 },
     uContColor: { value: Array.from({ length: 6 }, () => new THREE.Vector3(1, 1, 1)) },
+    uCont: { value: ink.cont },
+    uContLine: { value: v3(CONT_LINE) },
+    uContTint: { value: CONT_TINTS.map((h) => v3(h)) },
+    uContW: { value: 0.11 },
     uContSweep: { value: Array.from({ length: 6 }, () => new THREE.Vector4(0, 0, 0, 0)) },
     uPaperTex: { value: neutralTexture() },
     uWashTex: { value: neutralTexture() },
@@ -146,6 +163,10 @@ uniform vec2 uLiftB;
 uniform float uBreath;
 uniform vec3 uContColor[6];
 uniform vec4 uContSweep[6];
+uniform sampler2D uCont;
+uniform vec3 uContLine;
+uniform vec3 uContTint[6];
+uniform float uContW;
 uniform sampler2D uPaperTex;
 uniform sampler2D uWashTex;
 uniform float uTexOn;
@@ -289,27 +310,56 @@ vec2 mistAt(vec2 bp) {
 }
 const vec3 MIST = vec3(0.78, 0.82, 0.9);
 
-// The coast's ink colour here: ivory, or the continent holder's wash where it has re-inked (swept clockwise
-// from north), brightened by a territory's glow.
+// The coast's ink colour here: ivory, brightened by a territory's glow. (v3: a held continent re-inks its
+// printed outline, continentInk, not its coast.)
 vec3 coastColor(float id, vec2 bp, out float glow) {
   vec3 c = uInkCoast;
   glow = 0.0;
   if (id > 0.5) {
     vec4 td = terrAt(id);
     glow = td.r;
-    int ci = int(td.b * 255.0 + 0.5);
-    if (ci < 6) {
-      vec4 sw = uContSweep[ci];
-      if (sw.w > 0.001) {
-        vec2 d = bp - sw.xy;
-        float ang = fract(atan(d.x, d.y) / 6.2831853 + 1.0);
-        float m = sw.z >= 0.999 ? 1.0 : 1.0 - smoothstep(sw.z - 0.035, sw.z, ang);
-        c = mix(c, uContColor[ci], sw.w * m);
-      }
-    }
     c = mix(c, uIvory, glow * 0.7);
   }
   return c;
+}
+
+// The printed continents (PLAN §2): each continent's halo of sea takes its faint paper tint (sea = 1 over
+// water), and one heavy line bounds it: silver, or the holder's ink while it is held, swept round clockwise
+// from north as it is taken (uContSweep: centre, progress, amount).
+const float CONT_DR = 1.2;
+vec3 continentInk(vec3 c, vec2 bp, float sea) {
+  if (!inBoard(bp)) return c;
+  vec2 uv = bUV(bp);
+  vec4 k = texture2D(uCont, uv);
+  vec4 kn = texelFetch(uCont, ivec2(uv * uFieldSize), 0);
+  int own = int(kn.g * 255.0 + 0.5);
+  // the region's paper tint: the continent's hue at the paper's own lightness (a zone, never a glow)
+  if (own < 6 && sea > 0.5) {
+    vec3 t = uContTint[own];
+    float lc = dot(c, vec3(0.299, 0.587, 0.114));
+    float lt = max(dot(t, vec3(0.299, 0.587, 0.114)), 1e-3);
+    c = max(c + (t - vec3(lt)) * 0.2 + 0.012, vec3(0.0));
+  }
+  float d = k.r * CONT_DR;
+  float aa = max(fwidth(d), 1e-4);
+  // a crisp printed line, lightly feathered like the coasts (the pen swells a little here and there)
+  float w = uContW * (1.0 + 0.22 * (nz(bp / 4.3 + 0.17).g - 0.5));
+  float a = 1.0 - smoothstep(w - 0.45 * aa, w + 0.45 * aa, d);
+  if (a < 0.002) return c;
+  // the pen's pressure: the line is solid, a hair drier here and there
+  a *= 0.86 + 0.14 * smoothstep(0.3, 0.62, nz(bp / 1.3 + 0.61).a);
+  int li = int(kn.b * 255.0 + 0.5);
+  vec3 lc = uContLine;
+  if (li < 6) {
+    vec4 sw = uContSweep[li];
+    if (sw.w > 0.001) {
+      vec2 dd = bp - sw.xy;
+      float ang = fract(atan(dd.x, dd.y) / 6.2831853 + 1.0);
+      float m = sw.z >= 0.999 ? 1.0 : 1.0 - smoothstep(sw.z - 0.035, sw.z, ang);
+      lc = mix(lc, uContColor[li], sw.w * m);
+    }
+  }
+  return mix(c, lc, a * 0.95);
 }
 
 // Contact shadow of a lifted tile (the only sign of a lift on the flat board): its footprint, offset
@@ -357,6 +407,7 @@ void main() {
     vec3 cc = coastColor(id, bp, glow);
     c = mix(c, uInkCoast * 0.96, k.b * 0.55);
     c = mix(c, cc, clamp(k.r * (1.0 + 0.5 * glow), 0.0, 1.0) * 0.92);
+    c = continentInk(c, bp, 1.0 - f.a);
     float sh = max(liftShadow(bp, uLiftA, -1.0), liftShadow(bp, uLiftB, -1.0));
     c *= 1.0 - 0.34 * sh;
   }
@@ -510,6 +561,8 @@ void main() {
   glow = max(glow, uGlow);
   c = mix(c, uInkBorder, clamp(k.g * (0.4 + 0.25 * uLight + 0.5 * glow), 0.0, 1.0));
   c = mix(c, cc, clamp(k.r * (1.0 + 0.5 * glow + 0.25 * uLight), 0.0, 1.0) * 0.92);
+  // a continent's border across land (Ural, the isthmus, Suez) is the printed outline too
+  c = continentInk(c, bp, 0.0);
 
   // selection rim: a screen-constant ivory line just inside the territory's own border
   if (uRim.x > 0.001) {

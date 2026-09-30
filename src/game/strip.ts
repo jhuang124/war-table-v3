@@ -314,7 +314,7 @@ export function buildStrip(inp: StripInput): StripVM {
             turnKey: `handoff:${inp.handoff}`,
           }
         : track;
-    const line = inp.handoff !== null ? `Pass to ${pName(s, inp.handoff)}` : (inp.narration ?? inp.idleLine ?? `${poss(pName(s, me))} turn`);
+    const line = inp.handoff !== null ? `Pass the cup to ${pName(s, inp.handoff)}` : (inp.narration ?? inp.idleLine ?? `${poss(pName(s, me))} turn`);
     return {
       mode: inp.idleLine && !inp.narration ? 'idle' : 'watching',
       track: shownTrack,

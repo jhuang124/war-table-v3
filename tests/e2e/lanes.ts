@@ -57,6 +57,11 @@ export const FLOWS: Record<string, FlowSpec> = {
   endgame: { lane: 'logic', why: 'menu, log, settings, End game now → victory → rematch (its autoplay only fills the ledgers)' },
   'mobile-flow': { lane: 'logic', why: 'phone screens by taps, rotation, victory, rematch' },
   smoke: { lane: 'logic', quick: true, why: 'title → new game → first turn: screens, seats, the Turn Track' },
+  table: {
+    lane: 'logic',
+    why: 'v3 table cues: stacks drawn with their counts, the cup beside the current seat, one ledger line per event, a held continent inked in its holder, the turn banner ≤ 300 ms after the turn starts (instant speed: a sanity bound, the banner is set in the same frame)',
+  },
+  squint: { lane: 'logic', why: 'v3 squint guard: at 30 % scale, the five tallest stacks and the continent outlines out-contrast the washes (numbers reported)' },
   pwa: { lane: 'logic', why: 'manifest, service worker, offline boot (its own production build and server)' },
 };
 

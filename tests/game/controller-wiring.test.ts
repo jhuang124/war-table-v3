@@ -230,8 +230,8 @@ describe('banners (docs/SIMPLIFY.md §5)', () => {
     const c = createController({ board: rb.b, audio: spyAudio().a, storage: kv, clock, dom: false });
     c.intent({ type: 'continue' });
     await vi.advanceTimersByTimeAsync(50);
-    // Resumed mid-attack: the turn banner names the seat, no stale army count.
-    expect(c.getViewModel().game!.banner).toMatchObject({ kind: 'turn', title: "JOHN'S TURN", sub: '', line: 'John' });
+    // Resumed mid-attack: the turn banner names the seat and the round, no stale army count (v3 banner).
+    expect(c.getViewModel().game!.banner).toMatchObject({ kind: 'turn', title: "JOHN'S TURN", sub: '', line: expect.stringMatching(/^John's turn · round \d+$/) });
     await vi.advanceTimersByTimeAsync(2000);
     const titles = new Set<string>();
     c.hooks.dispatch({ type: 'blitz', player: 0, from: 'new_guinea', to: 'eastern_australia', stopAt: 1 });

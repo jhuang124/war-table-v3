@@ -1,7 +1,8 @@
 // Two humans with "Hide cards between turns" on: John looks at his hand in the Cards sheet, places,
 // and ends his turn through the Turn Track (Attack, then End turn); zero frames of Sam's hand may be visible before the cover is up. Every DOM
 // mutation and every animation frame is checked in the page. Then: the cover reads right, Enter
-// accepts, the turn banner follows, and the cover does not fire for a human holding no cards.
+// accepts, the turn banner follows, and (v3, _claude/v3/PLAN.md §2) the cup passes to a human holding no
+// cards too: the cover is on whenever 2+ humans share the device; the setting still turns it off.
 import { ART, check, clickBtn, finish, idle, loadScenario, open, place, rendered, scenario, seg, state, ui } from './lib';
 import type { Card, GameState } from '../../src/engine';
 
@@ -76,9 +77,9 @@ const leak = (await page.evaluate('window.__leak')) as { checks: number; leaks: 
 check(leak.leaks === 0, `zero frames of Sam’s hand before the cover (${leak.checks} checks, ${leak.leaks} leaks${leak.first ? ', first: ' + leak.first : ''})`, results);
 check(leak.coverSeen > 0, 'the cover was up at full opacity', results);
 const cover = (await page.locator('[data-testid="handoff"]').textContent())?.replace(/\s+/g, ' ').trim() ?? '';
-check(/Pass to Sam/.test(cover) && /armies waiting · 3 cards · set ready/.test(cover) && /I'm Sam · start turn/.test(cover), `cover: ${cover}`, results);
+check(/Pass the cup to Sam/.test(cover) && !!(await page.locator('[data-testid="handoff"] .ho-cup svg').count()) && /armies waiting · 3 cards · set ready/.test(cover) && /I'm Sam · start turn/.test(cover), `cover: ${cover}`, results);
 let u = await ui(page);
-check(u.line === 'Pass to Sam' && !u.banners.some((b) => b.startsWith("SAM'S TURN")), `under the cover: the line "${u.line}", turn banner waits`, results);
+check(u.line === 'Pass the cup to Sam' && !u.banners.some((b) => b.startsWith("SAM'S TURN")), `under the cover: the line "${u.line}", turn banner waits`, results);
 // Under the cover the track is not live and nothing on the strip is brass (the cover's button is the
 // one thing to press). Sam's turn hasn't started on the display yet (turnStarted waits for the cover),
 // so the marker still reads the displayed turn.
@@ -109,6 +110,11 @@ const noCards = scenario({ ural: [0, 5] }, { kind: 'attack' }, {
 await loadScenario(page, noCards, { settings: { hideCardsBetweenTurns: true } });
 await seg(page, 'endTurn');
 await page.waitForTimeout(400);
-check((await page.locator('[data-testid="handoff"]').count()) === 0, 'no cover when the next human holds no cards', results);
+check((await page.locator('[data-testid="handoff"]').count()) === 1, 'the cup passes to a human holding no cards too (v3)', results);
+// switched off (a v5 settings file): no cover
+await loadScenario(page, noCards, { settings: { hideCardsBetweenTurns: false, v: 5 } });
+await seg(page, 'endTurn');
+await page.waitForTimeout(400);
+check((await page.locator('[data-testid="handoff"]').count()) === 0, 'the setting still turns the cover off', results);
 await browser.close();
 finish(results, errors);

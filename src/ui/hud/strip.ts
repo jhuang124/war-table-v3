@@ -10,8 +10,11 @@
 // current (or recommended next) word and its brush underline; everything else is ivory. The line swaps
 // (the old one dries, the new one is drawn in; never two at once) when its wording changes; when only
 // a number changes it re-inks (±1) or counts (≥ 5). Everything is patched in place.
+// v3 (_claude/v3/PLAN.md §3, John 2026-09-30 "fuller, not busier"): above the line, the ledger's latest
+// sentence stays at low ivory until the next one replaces it (desktop: the one before it too, fainter); a
+// tap there opens the ledger. "Round 6" is written at the left of the line's row (desktop).
 
-import type { ButtonVM, CountVM, GoldVM, StripVM, TrackSegId, TrackVM, UiIntent } from '../../game/viewModel';
+import type { ButtonVM, CountVM, GoldVM, LogLineVM, StripVM, TrackSegId, TrackVM, UiIntent } from '../../game/viewModel';
 import { PLAYER_COLORS } from '../../shared/palette';
 import { ActionButton } from '../controls';
 import { brushMark } from '../../shared/enso';
@@ -584,6 +587,9 @@ export class BottomStrip {
   private vm: StripVM | null = null;
   private gold: GoldVM | undefined = undefined;
   private turnKey = '';
+  private events: HTMLDivElement;
+  private round: HTMLSpanElement;
+  private eventsKey = '';
 
   constructor(send: (i: UiIntent) => void) {
     this.el = h('section', 'strip');
@@ -600,7 +606,18 @@ export class BottomStrip {
     zone.dataset.testid = 'action-zone';
     zone.append(this.count, this.buttons.el);
     this.say = h('div', 'st-say');
-    this.say.append(this.line.el);
+    // A click (a mouse) on the event lines opens the ledger; on touch they're words only (a 44 px target
+    // there would take taps from the board above the dock), and the ledger is the menu's.
+    this.events = h('div', 'st-events');
+    this.events.dataset.testid = 'events';
+    this.events.title = 'The ledger';
+    this.events.addEventListener('click', (e) => {
+      if ((e as PointerEvent).pointerType === 'touch' || matchMedia('(pointer: coarse)').matches) return;
+      send({ type: 'overlay', overlay: 'log' });
+    });
+    this.round = h('span', 'st-round num');
+    this.round.dataset.testid = 'round';
+    this.say.append(this.events, this.round, this.line.el);
     this.el.append(this.say, this.rule.el, this.seat.el, this.track.el, zone);
     // The ensō follows the current word: on an advance it slides; on a resize (or fonts arriving) it cuts.
     const put = (slide: boolean) => this.rule.place(this.track.currentX(this.rule.el), slide);
@@ -624,6 +641,24 @@ export class BottomStrip {
   /** The game's ensō on the rule. */
   setSeed(seed: number): void {
     this.rule.setSeed(seed);
+  }
+
+  /** The ledger's last lines (oldest first) and the round, written above / beside the line. */
+  setEvents(lines: LogLineVM[] | undefined, round: number | undefined): void {
+    setText(this.round, round && round > 0 ? `Round ${round}` : '');
+    const ls = (lines ?? []).slice(-2);
+    const key = ls.map((l) => `${l.id}:${l.text}`).join('|');
+    if (key === this.eventsKey) return;
+    const prevLast = this.eventsKey.split('|').pop()?.split(':')[0];
+    this.eventsKey = key;
+    this.events.textContent = '';
+    ls.forEach((l, i) => {
+      const last = i === ls.length - 1;
+      const el = h('span', `ev-line${last ? '' : ' prev'}${last && String(l.id) !== prevLast ? ' fresh' : ''}`, minus(l.text));
+      el.dataset.testid = last ? 'event-line' : 'event-prev';
+      this.events.append(el);
+    });
+    toggle(this.events, 'hidden', ls.length === 0);
   }
 
   /** Another line owns the slot (a breath line, the rotate hint): the strip's line steps aside. */

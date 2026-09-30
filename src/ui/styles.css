@@ -802,3 +802,47 @@
 
 /* The `font` shorthand resets the numeric variant: figures are lining and tabular everywhere. */
 .ui-root, .ui-root * { font-variant-numeric: lining-nums tabular-nums; }
+
+
+/* ---- v3 table cues (_claude/v3/PLAN.md §2–3) ------------------------------------------------------- */
+/* The seat strip keeps its look; under each ring: held continents (ticks in their printed tint) and cards. */
+.seat-chip { padding-left: var(--cup-slot, 2.35rem); }
+.sc-col { position: relative; flex: none; display: flex; flex-direction: column; align-items: center; }
+.sc-marks { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); display: flex; align-items: center; justify-content: center; gap: 0.22rem; height: 0.9rem; margin-top: -0.1rem; color: var(--ivory-55); font-size: 0.875rem; line-height: 1; white-space: nowrap; }
+.sc-marks.empty { visibility: hidden; }
+.sc-tick { display: block; width: 0.375rem; height: 0.625rem; }
+.sc-tick svg { display: block; width: 100%; height: 100%; }
+.sc-cards { display: inline-flex; align-items: center; gap: 0.2rem; margin-left: 0.2rem; font-weight: 600; color: var(--ivory-78); }
+.sc-cards svg { width: 0.5rem; height: 0.6875rem; }
+.seat-chip.out .sc-marks { visibility: hidden; }
+/* The cup: an object on the paper beside the current seat's ring (cup.ts). */
+.ts-cup { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; z-index: 1; }
+.ts-cup .cup-body { position: absolute; right: 0.1rem; bottom: -0.3rem; width: 1.95rem; height: 2.2rem; transform-origin: 30% 86%; }
+.ts-cup .cup-svg, .ho-cup .cup-svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.cup-die { position: fixed; z-index: 30; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; pointer-events: none; }
+.cup-die svg { display: block; width: 100%; height: 100%; }
+.ho-emb { position: relative; }
+.ho-cup { position: absolute; left: 50%; top: 50%; width: 42%; height: 50%; transform: translate(-50%, -54%); }
+/* The dock: the ledger's last lines faintly above the strip's line (desktop two, phones one), the round. */
+.st-events { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 0.1rem; padding-bottom: 0.2rem;
+  pointer-events: auto; cursor: pointer; color: var(--ivory); max-width: min(46rem, 80vw); }
+@media (pointer: coarse) { .st-events { pointer-events: none; cursor: default; } }
+.st-events .ev-line { font-size: 0.9375rem; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; opacity: 0.42; transition: opacity 300ms ease-out; }
+.st-events .ev-line.prev { opacity: 0.22; font-size: 0.875rem; }
+.st-events .ev-line.fresh { animation: ev-in 420ms cubic-bezier(0.2, 0.9, 0.2, 1) both; }
+@keyframes ev-in { from { opacity: 0.9; } to { opacity: 0.42; } }
+.has-say .st-events { opacity: 0.25; }
+.st-round { position: absolute; left: 0; bottom: 0.1rem; font-size: 0.9375rem; letter-spacing: 0.08em; font-variant: small-caps; color: var(--ivory-55); white-space: nowrap; pointer-events: none; }
+/* The ledger: an ink scroll by round, the newest round open. */
+.lg-round { border-bottom: 1px solid var(--ivory-06); }
+.lg-head { display: flex; align-items: baseline; justify-content: space-between; width: 100%; padding: 0.55rem 0.1rem 0.35rem; background: none; border: 0; color: var(--ivory); font: inherit; font-size: 1.125rem; letter-spacing: 0.08em; font-variant: small-caps; cursor: pointer; text-align: left; }
+.lg-head .lg-n { color: var(--ivory-40); font-size: 0.9375rem; letter-spacing: 0; font-variant: normal; }
+.lg-round.closed .lg-lines { display: none; }
+.lg-lines .log-line { border-bottom: 0; padding: 0.28rem 0.1rem 0.28rem 0.5rem; }
+
+/* The ledger (v3 review): an ink sheet on the dimmed board, never frosted glass. Deeper paper behind the text,
+   the one ivory hairline across its top, radius 0; Close is a bare word; round headings in small caps. */
+.scrim.is-ledger, .form-phone .scrim.is-ledger { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(8, 13, 27, 0.55); }
+.log-sheet { background: var(--paper-deep, #0b1224); border-top: 1px solid var(--ivory-40); }
+.log-sheet .sheet-title { font-family: 'Cormorant Garamond Variable', 'Cormorant Garamond', Georgia, serif; }
+.lg-head .lg-r { font-weight: 600; }

@@ -37,8 +37,12 @@ export function sanitizeDraft(x: unknown): NewGameDraft {
         .filter((s) => s && typeof s === 'object' && PLAYER_COLOR_IDS.includes(s.color))
         .slice(0, 4)
         .map((s) => ({
-          // Older drafts defaulted humans to "Player N"; seats now default to their color's name (R1-16).
-          name: typeof s.name === 'string' && !/^Player \d$/.test(s.name.trim()) ? s.name.slice(0, 24) : PLAYER_COLORS[s.color].name,
+          // Older drafts defaulted humans to "Player N"; seats now default to their color's name (R1-16). A name
+          // that is a colour id ('Cobalt', from before the ink palette) is the old default too: its display name.
+          name:
+            typeof s.name === 'string' && !/^Player \d$/.test(s.name.trim()) && !(PLAYER_COLOR_IDS as string[]).includes(s.name.trim().toLowerCase())
+              ? s.name.slice(0, 24)
+              : PLAYER_COLORS[s.color].name,
           color: s.color,
           kind: s.kind === 'ai' ? ('ai' as const) : ('human' as const),
           difficulty: s.difficulty === 'easy' || s.difficulty === 'hard' ? s.difficulty : ('normal' as const),

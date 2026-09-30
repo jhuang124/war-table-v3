@@ -7,10 +7,11 @@ import { FRAME_W } from './scene';
 
 const DEG = Math.PI / 180;
 /**
- * Home pitch (docs/INK.md B §3): ~80°, a painting on a table seen nearly from above — the far row keeps its
- * size and the washes read flat. The player may tilt 70–85° and turn ±10°.
+ * Home pitch: 85° (John 2026-09-30 via the lead: one medium, the pieces are painted too, so the board is seen
+ * from above like a painting on the table: the steepest the rig allows). The player may tilt 70–85° and
+ * turn ±10°.
  */
-export const HOME_PITCH = 80;
+export const HOME_PITCH = 85;
 export const PITCH_MIN = 70;
 export const PITCH_MAX = 85;
 export const AZ_MAX = 10;

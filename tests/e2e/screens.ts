@@ -253,7 +253,7 @@ for (const target of TARGETS) {
     await page.waitForTimeout(400);
     await page.evaluate(() => {
       const k = 'risk3d.settings.v1';
-      localStorage.setItem(k, JSON.stringify({ ...JSON.parse(localStorage.getItem(k) ?? '{}'), hideCardsBetweenTurns: false }));
+      localStorage.setItem(k, JSON.stringify({ ...JSON.parse(localStorage.getItem(k) ?? '{}'), hideCardsBetweenTurns: false, v: 5 }));
     });
   });
 

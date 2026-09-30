@@ -11,6 +11,7 @@
 
 import {
   CONTINENTS,
+  CONTINENT_IDS,
   TERRITORIES,
   TERRITORY_IDS,
   UNCLAIMED,
@@ -220,6 +221,8 @@ export interface RiskHooks {
   stats(): ReturnType<BoardView['getStats']>;
   ui(): UiSnapshot;
   explain(t: TerritoryId): { ok: boolean; code?: string; text: string };
+  /** Additive (v3): the ledger (the log), oldest first. */
+  ledger(): { id: number; round: number; kind: string; text: string }[];
   metrics(): Metrics;
   resetMetrics(): void;
 }
@@ -1239,8 +1242,8 @@ class Controller {
     const s = this.disp;
     if (!s || !this.settings.hideCardsBetweenTurns || this.autoplayOn) return false;
     if (s.players[player]?.kind !== 'human') return false;
-    if (this.humanCount(s, true) < 2) return false;
-    return s.players[player].cards.length >= 1;
+    // v3: the cup passes whenever 2+ humans share the device, cards or not (one tap dismisses it).
+    return this.humanCount(s, true) >= 2;
   }
 
   // =========================================================================
@@ -1272,11 +1275,11 @@ class Controller {
         if (this.meta && this.isHumanSeat(ev.player) && ev.round >= 2) {
           recap = buildRecap(this.meta.recap[ev.player], d);
           delete this.meta.recap[ev.player];
-          if (recap) this.log('recap', ev.player, recap);
+          if (recap) this.log('recap', ev.player, recap, ev.round);
         }
         // The turn banner is for the humans at the table; an AI turn is named by the step indicator.
-        if (!this.isAiDriven(ev.player)) this.showTurnBanner(ev.player, ev.reinforcements.total, recap, d);
-        this.log('turn', ev.player, `Round ${ev.round}${SEP}${poss(pName(d, ev.player))} turn${SEP}+${ev.reinforcements.total}`);
+        if (!this.isAiDriven(ev.player)) this.showTurnBanner(ev.player, ev.reinforcements.total, recap, d, ev.round);
+        this.log('turn', ev.player, `${poss(pName(d, ev.player))} turn${SEP}${ev.reinforcements.total} to place`, ev.round);
         if (human) this.play('turnStart', { variant: prevKind === 'ai' ? 'bright' : undefined });
         // Boards that implement setAutoCamera return home themselves on turnStarted.
         if (this.settings.autoCamera && !skip && !this.board.setAutoCamera) this.board.focusTerritories([]);
@@ -1558,13 +1561,13 @@ class Controller {
   private engagementText(final: boolean): string {
     const g = this.eng!;
     const d = this.disp!;
+    // The house voice (v3 ledger): middle dots, no colon, no arrow. 'John took Siberia from Ural · 19 vs 1 · lost 1'
     const A = pName(d, g.attacker);
-    const verb = g.blitz ? 'blitzed' : 'attacked';
-    const head = `${A} ${verb} ${tName(g.to)} from ${tName(g.from)}: ${g.startA} vs ${g.startD}`;
+    const odds = `${g.startA} vs ${g.startD}`;
     const upset = g.upset ? `${SEP}${g.upset}` : '';
-    if (g.conquered) return `${head} → took it, lost ${g.attLost}${upset}`;
-    if (final) return `${head} → ${pName(d, g.defender)} held, ${A} lost ${g.attLost}${upset}`;
-    return `${head} → ${d.territories[g.from].armies} vs ${d.territories[g.to].armies}`;
+    if (g.conquered) return `${A} took ${tName(g.to)} from ${tName(g.from)}${SEP}${odds}${SEP}lost ${g.attLost}${upset}`;
+    if (final) return `${pName(d, g.defender)} held ${tName(g.to)} against ${A}${SEP}${odds}${SEP}${A} lost ${g.attLost}${upset}`;
+    return `${A} ${g.blitz ? 'blitzes' : 'attacks'} ${tName(g.to)} from ${tName(g.from)}${SEP}${odds}${SEP}now ${d.territories[g.from].armies} vs ${d.territories[g.to].armies}`;
   }
 
   private writeEngagementLog(final: boolean): void {
@@ -1663,11 +1666,13 @@ class Controller {
   }
 
   /** "JOHN'S TURN" + '+9 armies' (null = a resumed mid-turn: no count), and the one recap line. */
-  private showTurnBanner(player: PlayerId, armiesIn: number | null, recap: string | null, s: GameState): void {
+  private showTurnBanner(player: PlayerId, armiesIn: number | null, recap: string | null, s: GameState, roundIn?: number): void {
+    const round = roundIn ?? s.round;
     const name = pName(s, player);
     const instant = this.settings.animationSpeed === 0;
     // Non-blocking and click-through (any input dismisses it); a grudge line gets time to be read.
-    const holdMs = instant ? 500 : recap ? 1600 : 1000;
+    // ~2 s in all with its draw-in and dry-out (PLAN §3); a grudge line gets a little longer.
+    const holdMs = instant ? 500 : recap ? 1800 : 1400;
     // An elimination banner keeps its moment: the turn banner waits for it to leave, so the room never
     // sees two banners at once.
     if (this.banner && this.banner.vm.kind === 'elimination') {
@@ -1676,7 +1681,7 @@ class Controller {
       if (this.turnBannerTimer) this.clock.clearTimeout(this.turnBannerTimer);
       this.turnBannerTimer = this.timer(() => {
         this.turnBannerTimer = null;
-        if (this.disp && this.disp.turn === turn && this.screen === 'game') this.showTurnBanner(player, armiesIn, recap, s);
+        if (this.disp && this.disp.turn === turn && this.screen === 'game') this.showTurnBanner(player, armiesIn, recap, s, round);
       }, wait + 10);
       return;
     }
@@ -1691,8 +1696,8 @@ class Controller {
       id: this.idSeq++,
       kind: 'turn',
       title: `${upper(poss(name))} TURN`,
-      // The turn breath's one serif line (docs/INK.md B2.6): 'John · 3 armies'.
-      line: armiesIn === null ? name : `${name}${SEP}${armies(armiesIn)}`,
+      // The turn banner (PLAN §3): "Sam's turn · round 6 · 7 to place", drawn in as the cup arrives.
+      line: armiesIn === null ? `${poss(name)} turn${SEP}round ${round}` : `${poss(name)} turn${SEP}round ${round}${SEP}${armiesIn} to place`,
       sub: armiesIn === null ? '' : `+${armiesIn} ${armiesIn === 1 ? 'army' : 'armies'}`,
       recap,
       seat: seatRef(s, player),
@@ -1713,13 +1718,13 @@ class Controller {
     this.tickBanners();
   }
 
-  private log(kind: LogLineVM['kind'], player: PlayerId | null, text: string): number {
+  private log(kind: LogLineVM['kind'], player: PlayerId | null, text: string, round?: number): number {
     const meta = this.meta;
     const d = this.disp;
     if (!meta || !d) return 0;
     const id = meta.logId++;
     // A new array every time: the HUD short-circuits on the lines array's identity.
-    const next = [...meta.log, { id, round: d.round, seat: player !== null && d.players[player] ? seatRef(d, player) : null, kind, text }];
+    const next = [...meta.log, { id, round: round ?? d.round, seat: player !== null && d.players[player] ? seatRef(d, player) : null, kind, text }];
     meta.log = next.length > LOG_CAP ? next.slice(next.length - LOG_CAP) : next;
     this.invalidate();
     return id;
@@ -2988,6 +2993,8 @@ class Controller {
       battle: this.buildBattle(d, sel, interactive),
       cards,
       log: this.meta.log,
+      round: d.round,
+      events: this.meta.log.slice(-2),
       banner,
       handoff: this.handoff ? { seat: seatRef(d, this.handoff.player), subline: this.handoffSubline(this.handoff.player) } : null,
       confirm: this.confirm,
@@ -3052,6 +3059,9 @@ class Controller {
       current: p.id === d.currentPlayer && d.phase.kind !== 'game-over',
       eliminated: p.eliminated,
       territories: territoryCount(d, p.id),
+      armies: TERRITORY_IDS.reduce((n, t) => n + (d.territories[t].owner === p.id ? d.territories[t].armies : 0), 0),
+      cards: p.cards.length,
+      continents: CONTINENT_IDS.filter((c) => CONTINENTS[c].territories.every((t) => d.territories[t].owner === p.id)),
       lostKey: this.lostKeys[p.id] ?? 0,
       out: p.eliminated && this.meta?.out?.[p.id] && d.players[this.meta.out[p.id].by] ? { by: seatRef(d, this.meta.out[p.id].by), round: this.meta.out[p.id].round } : null,
     }));
@@ -3524,6 +3534,11 @@ class Controller {
     }
   }
 
+  /** Test hook (v3): the ledger, oldest first. */
+  ledgerHook(): { id: number; round: number; kind: string; text: string }[] {
+    return (this.meta?.log ?? []).map((l) => ({ id: l.id, round: l.round, kind: l.kind, text: l.text }));
+  }
+
   uiSnapshot(): UiSnapshot {
     const vm = this.getViewModel();
     const g = vm.game;
@@ -3671,6 +3686,7 @@ export function createController(opts: { board: BoardView; audio: AudioEngine } 
     screenPos: (t) => c.screenPos(t),
     stats: () => c.board.getStats(),
     ui: () => c.uiSnapshot(),
+    ledger: () => c.ledgerHook(),
     explain: (t) => {
       const e = c.explain(t);
       return { ok: e.ok, ...(e.code ? { code: e.code } : {}), text: e.text };

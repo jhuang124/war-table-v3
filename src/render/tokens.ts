@@ -1,22 +1,22 @@
-// Army figures (docs/INK.md A8, B §3 "Units", B §4 motion): one ivory brush figure per territory,
-// standing on a small wash blot in the owner's deep ink. The denomination follows physical Risk —
-// infantry 1–4, cavalry 5–9, artillery 10+ — and the exact count sits beside the figure in a brushed
-// ensō ring (DOM, overlay.ts), so it stays crisp at any DPR.
+// Army pieces (_claude/v3/PLAN.md §1, John 2026-09-30 via the lead: "one medium — everything on the board is
+// painted, including the pieces"): each territory's army is ONE painted stone set on the paper, in the same hand
+// that painted the coasts. A stone is a slightly irregular ellipse (a brushed wobble, fixed per territory)
+// filled with the seat's colour as a flat wash (laid on thicker than the territory's own, so it stands off it), a 1 px ink edge in the seat's deep tone, and one darker
+// wash stroke offset ~1.5 px lower-right for its shadow — painted, never blurred, no gradient, no highlight.
+// A piece is a thing because it has an edge, a painted shadow, and it moves, not because it is lit.
 //
-// The figures are the chosen sprites (public/units/atlas.webp, built by scripts/units.ts), drawn as
-// instanced camera-facing quads anchored at the feet: at the flat ~80° home pitch they read upright, the
-// way a painted figure stands on a scroll. The sprite's dark ink is re-tinted to the owner's deep colour
-// and its light ink stays ivory, so a figure reads on every wash; the blot under it gives it ground.
+// Size is strength, area-linear: d = dmin + (dmax − dmin) · √(min(n, 30) / 30) (14 → 36 px at the 1440 home;
+// the board scales the pair per device). Each territory has a cap (set from the home view by index.ts) so a
+// stone never crosses another territory's land nor covers another territory's numeral. The numeral is DOM
+// (overlay.ts), centred on the stone.
 //
-// All motion is shader work and small transforms, never scale pops:
-//   place     N ink dots fall onto the blot and soak in; the figure re-inks (a brief deepening) and hops
-//   denom     the old figure dries out in patches, the new one is drawn in, feet → head
-//   attack    a slight lean toward the target (both figures turn to face each other)
-//   loss      a recoil away from the blow and a tiny ink splash; at the verdict a puff (INK2 §2.2): a little
-//             ink lifts off the figure as smoke and settles back
-//   fall      at 0 the figure dissolves upward as ink smoke (the `smoke` pigment map, public/tex)
-//   traveller a figure walks the arrow (or the fortify route) with a light step
-// Nothing moves at idle: the calm belongs to the paper (index.ts), not the figures.
+// Motion (the same beats as before; Pillar 5):
+//   place       the stone swells as the wash soaks in (≤ 200 ms); the wood click lands as it starts
+//   loss        it shrinks a step inside the verdict (the fight figure puffs its ink smoke)
+//   empty       at 0 it dries back to paper (320 ms); the seat's last stone (an elimination) over ~1.2 s
+//   traveller   a stone slides along the stroke (or the fortify route) and settles
+//   preview     a ghost stone at the size a count would leave (occupy / fortify / a staged placement)
+// Figures (the ivory brush soldiers, the same medium) stand only on the two fighting territories.
 import * as THREE from 'three';
 import type { TerritoryId } from '../engine/types';
 import { TERRITORY_IDS } from '../engine/mapData';
@@ -26,30 +26,39 @@ import { deepOf, type TileSet } from './tiles';
 import { loadTexmap } from './texmaps';
 import ATLAS from './unitsAtlas.json';
 
-/** 0 = infantry (1–4), 1 = cavalry (5–9), 2 = artillery (10+). */
+/** 0 = infantry (1–4), 1 = cavalry (5–9), 2 = artillery (10+): the fight figures only. */
 export type Denom = 0 | 1 | 2;
 export const denomOf = (n: number): Denom => (n >= 10 ? 2 : n >= 5 ? 1 : 0);
 export const DENOM_NAMES = ['infantry', 'cavalry', 'artillery'] as const;
 
-/** Blot radius (board units, at UI scale 1): the figure's ground. Also the piece's nominal radius. */
-export const TOKEN_R = 1.06;
-/** Kept for callers of the old API (the piece has no base any more). */
+/** The count past which a stone stops growing (the numeral carries the rest). */
+export const STONE_FULL = 30;
+/** A stone's diameter as a fraction of its full size for a count: dmin + (dmax − dmin)·√(n/30), normalised. */
+export function stoneK(n: number, dmin: number, dmax: number): number {
+  if (n <= 0) return 0;
+  return dmin + (dmax - dmin) * Math.sqrt(Math.min(n, STONE_FULL) / STONE_FULL);
+}
+/** Kept for the overlay's numeral box: a stone's numeral box is 70 % of its diameter tall. */
+export const DISC_E = 0.7;
+/** Kept for callers of the old API. */
+export const HEIGHT_CAP = 1;
+export const TOKEN_R = 1.1;
 export const TOKEN_H = 0;
-/**
- * Figure height per denomination (board units at size scale 1). At the 1440×900 home (~12.7 px/unit):
- * soldier ~41 px tall, rider ~39×29 px, cannon ~22×40 px — the ~34×40 px of docs/INK.md B §3.
- */
+/** Kept for callers of the old stack API (tests): the chips a count would be. */
+export function discsOf(n: number): { thick: number; thin: number } {
+  if (n <= 0) return { thick: 0, thin: 0 };
+  if (n <= 5) return { thick: 0, thin: n };
+  return { thick: Math.floor(n / 5), thin: n % 5 };
+}
+
+/** Fight figure height per denomination (board units at size scale 1). */
 const FIG_H = [3.45, 3.3, 1.9];
 const SPRITES = [ATLAS.sprites.soldier, ATLAS.sprites.rider, ATLAS.sprites.cannon];
 const ASPECT = SPRITES.map((s) => s.w / s.h);
-/** The figure stands a little left of the anchor, so figure + ring sit centred on the territory. */
-const FIG_SHIFT = 0.75;
 const MAX_TRAVELERS = 8;
-const MAX_DOTS = 64;
-/** Placement ink dots alive at once (B §4: ≤ 12). */
-const MAX_PLACE_DOTS = 12;
-const FIG_CAP = TERRITORY_IDS.length * 2 + MAX_TRAVELERS;
-const BLOT_CAP = TERRITORY_IDS.length + MAX_TRAVELERS + MAX_DOTS;
+const STONE_CAP = TERRITORY_IDS.length * 2 + MAX_TRAVELERS;
+const FIG_CAP = TERRITORY_IDS.length + MAX_TRAVELERS;
+const BLOT_CAP = TERRITORY_IDS.length + MAX_TRAVELERS;
 const IVORY_RGB = hexToRgb(IVORY);
 
 export interface TokenTraveler {
@@ -57,54 +66,53 @@ export interface TokenTraveler {
   n: number;
   /** Number color (the mover's palette ink). */
   ink: string;
-  /** World position of the traveller's feet (updated every frame while it walks). */
+  /** World position of the traveller's centre on the paper (updated every frame while it slides). */
   top: THREE.Vector3;
-  /** Kept for the overlay: the feet again (the ring is placed beside the figure in screen space). */
   plaque: THREE.Vector3;
-  /** World point at the top of the traveller's figure. */
+  /** Its numeral's point (the centre again). */
   figTop: THREE.Vector3;
-  /** Half the figure's width, world units. */
+  /** The stone's radius, world units. */
   halfW: number;
-  /** The mover's palette id (the ring paints in its colours). */
+  /** The mover's palette id. */
   owner: string;
-  /** The figure it walks as. */
   denom: Denom;
   alive: boolean;
 }
 
 interface Tok {
   id: TerritoryId;
-  blot: RGB;
+  col: RGB;
   deep: RGB;
+  /** The engine count this piece ends at. */
   n: number;
+  /** The count the stone reads (its numeral, the test hook). */
+  shown: number;
+  /** The count the stone's size shows right now (a float while it swells or shrinks). */
+  disp: number;
+  /** 0..1 presence. */
+  alpha: number;
+  /** Drying back to paper, 0..1 (emptied, conquered, eliminated). */
+  dry: number;
+  /** The wash soaking in (placement), 0..1: a brief deepening of the fill. */
+  soak: number;
+  /** Ghost total (preview), or null. */
+  preview: number | null;
+  // --- the fight figure (only while this territory fights)
+  fig: number;
   denom: Denom;
-  /** 0..1 presence (0 = not drawn). */
-  scale: number;
-  /** Stroke reveal of the current figure, feet → head (1 = fully drawn). */
   reveal: number;
-  /** The figure being replaced (denomination change), drying out; null = none. */
-  old: { denom: Denom; dry: number } | null;
-  /** Ink smoke dissolve 0..1 (the fall). */
-  smoke: number;
-  /** The verdict's puff (0 → 0.3 → 0): the smoke's look, but the figure stays (INK2 §2.2). */
+  figOld: { denom: Denom; dry: number } | null;
+  figSmoke: number;
   puff: number;
-  /** Overall alpha 0..1. */
-  fade: number;
-  /** Screen-plane offset (world units along the camera's right / up): hops, recoil. */
-  offX: number;
-  offY: number;
-  /** Lean in the screen plane (radians, + = the top toward screen right). */
+  figOffX: number;
+  figOffY: number;
   lean: number;
-  /** Facing: 1 = as drawn (right), −1 = mirrored. */
   flip: number;
-  /** Re-ink pulse 0..1 (placement). */
-  ink: number;
-  /** Colours frozen while the figure smokes away (a conquest recolours the tile under it). */
-  frozen: { blot: RGB; deep: RGB } | null;
-  pendingColor: { blot: RGB; deep: RGB } | null;
+  frozen: { col: RGB; deep: RGB } | null;
+  pendingColor: { col: RGB; deep: RGB } | null;
   ver: Record<string, number>;
   seed: number;
-  /** World position of the feet, refreshed by update(). */
+  /** World centre of the stone, refreshed by update(). */
   top: THREE.Vector3;
   plaque: THREE.Vector3;
   figTop: THREE.Vector3;
@@ -112,36 +120,110 @@ interface Tok {
 }
 
 interface Traveler extends TokenTraveler {
-  blotC: RGB;
+  col: RGB;
   deep: RGB;
   pts: THREE.Vector3[];
   cum: number[];
   t: number;
-  steps: number;
   flip: number;
   seed: number;
-}
-
-interface Dot {
-  x: number;
-  y: number;
-  z: number;
-  vx: number;
-  vz: number;
-  /** Fall height (world y above the paper at t = 0). */
-  h: number;
-  r: number;
-  t: number;
-  ms: number;
-  delay: number;
-  kind: 'place' | 'splash';
-  color: RGB;
-  alive: boolean;
 }
 
 // ---------------------------------------------------------------------------------------------------
 // Shaders
 // ---------------------------------------------------------------------------------------------------
+
+/** The stone lies flat on the paper (world XZ), its quad a little bigger than it for the wobble and shadow. */
+const STONE_VERT = /* glsl */ `
+attribute vec3 iPos;
+attribute vec4 iSize;
+attribute vec4 iCol;
+attribute vec3 iDeep;
+attribute vec4 iFx;
+varying vec2 vP;
+varying vec4 vSize;
+varying vec4 vCol;
+varying vec3 vDeep;
+varying vec4 vFx;
+const float M = 1.35;
+void main() {
+  float R = iSize.x;
+  vP = position.xy * 2.0 * M;
+  vec3 w = iPos + vec3(position.x * 2.0 * M * R + iFx.x, 0.0, -position.y * 2.0 * M * R + iFx.y);
+  vSize = iSize;
+  vCol = iCol;
+  vDeep = iDeep;
+  vFx = iFx;
+  gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+}
+`;
+
+const STONE_FRAG = /* glsl */ `
+uniform sampler2D uNoise;
+uniform vec3 uPaper;
+varying vec2 vP;
+varying vec4 vSize;
+varying vec4 vCol;
+varying vec3 vDeep;
+varying vec4 vFx;
+float nrm(float v) { return clamp((v - 0.22) * 1.8, 0.0, 1.0); }
+// the stone's brushed wobble: a few low harmonics, fixed per territory
+float wob(vec2 p, float seed) {
+  float a = atan(p.y, p.x);
+  return 1.0 + 0.045 * sin(2.0 * a + seed * 6.3) + 0.035 * sin(3.0 * a + seed * 11.1) + 0.02 * sin(5.0 * a + seed * 3.7);
+}
+void main() {
+  float seed = vSize.y;
+  float ghost = vSize.z;
+  float dry = vSize.w;
+  vec2 p = vP;
+  // the paper's pixel, in stone radii
+  float fw = max(fwidth(length(p)), 1e-4);
+  float d = length(p) / wob(p, seed);
+  // a painted shadow: the same shape one and a half pixels to the lower right (screen: +x, south = -p.y)
+  vec2 q = p - vec2(1.6 * fw, -1.6 * fw);
+  float ds = length(q) / wob(q, seed);
+  float inside = 1.0 - smoothstep(1.0 - 0.7 * fw, 1.0 + 0.3 * fw, d);
+  float shadowIn = 1.0 - smoothstep(1.0 - 0.7 * fw, 1.0 + 0.3 * fw, ds);
+  float shadow = shadowIn * (1.0 - inside);
+  if (inside < 0.004 && shadow < 0.004) discard;
+  // the fill: a flat wash of the seat's base (a hair of paper grain, like every wash on the board)
+  vec4 nz = texture2D(uNoise, p * 0.18 + seed);
+  // (more pigment than the territory's own wash: the same colour, laid on thicker, so the stone stands off it)
+  vec3 fill = mix(vCol.rgb, vDeep, 0.5) * (1.0 + 0.03 * (nrm(nz.a) - 0.5));
+  // the wash soaking in (placement): the pigment deepens for a moment
+  fill = mix(fill, vDeep, 0.35 * vFx.z);
+  // the ink edge: ~1 px in the seat's deep tone, just inside the outline, a little uneven like the coasts
+  float edgeW = (1.0 + 0.35 * (nrm(nz.g) - 0.5)) * fw;
+  float edge = 1.0 - smoothstep(0.35 * edgeW, 1.25 * edgeW, 1.0 - d);
+  vec3 ink = vDeep * 0.8;
+  vec3 col = mix(fill, ink, edge * 0.9);
+  float a = inside;
+  if (ghost > 0.5) {
+    // a ghost: the edge, and only a breath of wash
+    col = mix(vCol.rgb, ink, edge);
+    a *= mix(0.22, 0.85, edge);
+  }
+  // drying back to paper: the pigment lifts in patches, the edge last
+  if (dry > 0.0) {
+    float e = nrm(nz.b) * 0.75 + 0.25 * nrm(nz.r);
+    float keep = smoothstep(dry * 1.15 - 0.15, dry * 1.15, e + 0.25 * edge);
+    a *= keep;
+    col = mix(col, mix(uPaper, vec3(0.8, 0.79, 0.76), 0.2), dry * 0.5);
+  }
+  float dim = min(vFx.w, 1.3);
+  col *= 1.0 - 0.14 * dim;
+  a *= vCol.a * (1.0 - 0.08 * dim);
+  // the shadow stroke: a darker wash of the seat's deep (on the paper under it), never blurred
+  float sa = shadow * 0.55 * vCol.a * (1.0 - dry) * (1.0 - 0.8 * ghost);
+  vec3 sc = vDeep * 0.42;
+  // stone over shadow (premultiplied)
+  vec3 outC = col * a + sc * sa * (1.0 - a);
+  float outA = a + sa * (1.0 - a);
+  if (outA < 0.004) discard;
+  gl_FragColor = vec4(outC, outA);
+}
+`;
 
 const FIG_VERT = /* glsl */ `
 attribute vec3 iPos;
@@ -195,8 +277,6 @@ void main() {
   vec2 sc = vec2(sp.x * 0.5 + seed, sp.y * 0.4 - smoke * 0.45 + seed * 0.37);
   vec4 nz = texture2D(uNoise, sc);
   if (smoke > 0.0 && uSmokeOn > 0.5) {
-    // real ink in water (the smoke map): rise, curl and the thinning edge from three taps of it. The map is
-    // uploaded with flipY off (texmaps.ts), so y is mirrored: the wisps rise the way they did before.
     nz.r = texture2D(uSmoke, vec2(sc.x, -sc.y)).r;
     vec2 s2 = sc * vec2(1.0, 0.8) + vec2(0.37, 0.61);
     nz.g = texture2D(uSmoke, vec2(s2.x, -s2.y)).r;
@@ -204,7 +284,6 @@ void main() {
     nz.b = texture2D(uSmoke, vec2(s3.x, -s3.y)).r;
   }
   if (smoke > 0.0) {
-    // the ink lifts off the paper as smoke: every part rises (the top most), curling as it goes
     float rise = smoke * (0.4 + 0.95 * nrm(nz.r)) * (0.3 + 0.7 * clamp(sp.y, 0.0, 1.3));
     sp.y -= rise;
     sp.x += (nrm(nz.g) - 0.5) * 0.9 * smoke * (0.15 + sp.y);
@@ -222,20 +301,17 @@ void main() {
   vec3 ivory = uIvory * (1.0 + 0.07 * vB.z);
   deep *= 1.0 - 0.35 * vB.z;
   vec3 col = mix(deep, ivory, k);
-  // drawn in, feet → head, with a bristled front
   float rv = vA.y;
   if (rv < 0.999) {
     float rn = texture2D(uNoise, vec2(sp.x * 1.3 + seed * 3.1, sp.y * 0.35 + seed)).b;
     float front = rv * 1.2 - 0.1;
     a *= 1.0 - smoothstep(front - 0.07, front, sp.y + (nrm(rn) - 0.5) * 0.18);
   }
-  // dries out in patches (the figure being replaced)
   float dry = vA.w;
   if (dry > 0.0) {
     float dn = nrm(texture2D(uNoise, vec2(sp.x * 0.9 + seed * 1.7, sp.y * 0.8)).a);
     a *= smoothstep(dry * 1.15 - 0.15, dry * 1.15, dn * 0.8 + 0.2 * (1.0 - sp.y)) * (1.0 - 0.35 * dry);
   }
-  // smoke thins and pales as it lifts
   if (smoke > 0.0) {
     float e = nrm(nz.b);
     a *= smoothstep(smoke * 0.95 - 0.3, smoke * 0.95, e * 0.7 + 0.3 * (1.0 - vSt.y / (1.0 + 1.3 * smoke)));
@@ -250,7 +326,7 @@ void main() {
 }
 `;
 
-/** The blot under a figure and the ink dots (placement, splash): flat soft ink on the paper. */
+/** Soft flat marks on the paper: the fight figures' ground blots. */
 const BLOT_VERT = /* glsl */ `
 attribute vec3 iPos;
 attribute vec3 iR;
@@ -278,19 +354,16 @@ void main() {
   float seed = vK.y;
   float d = length(vP);
   float a;
-  if (vK.x < 0.5) {
-    // a blot: a soft pool, ragged at the edge, pigment gathered toward the back (behind the feet)
+  if (vK.x > 1.5) {
+    // a contact shadow: dense under the stack, feathering out
+    a = (1.0 - smoothstep(0.25, 1.0, d));
+    a *= a;
+  } else {
     vec4 n = texture2D(uNoise, vP * 0.22 + seed);
     float edge = d + (nrm(n.g) - 0.5) * 0.42 + (nrm(n.a) - 0.5) * 0.14;
     a = 1.0 - smoothstep(0.52, 0.98, edge);
     a *= 0.72 + 0.28 * nrm(n.r);
     a *= 0.85 + 0.15 * smoothstep(-0.9, 0.4, vP.y);
-  } else {
-    // an ink dot: round, a slightly darker rim as it soaks
-    vec4 n = texture2D(uNoise, vP * 0.35 + seed);
-    float edge = d + (nrm(n.a) - 0.5) * 0.3;
-    a = 1.0 - smoothstep(0.7, 1.0, edge);
-    a *= 0.8 + 0.2 * smoothstep(0.4, 0.9, edge);
   }
   a *= vCol.a;
   if (a < 0.004) discard;
@@ -322,7 +395,6 @@ class Instanced {
     this.mesh = new THREE.Mesh(this.geo, mat);
     this.mesh.frustumCulled = false;
   }
-  /** Start writing instance `k` (returns false when full). */
   next(): boolean {
     return this.k < this.cap;
   }
@@ -342,6 +414,9 @@ class Instanced {
       a.addUpdateRange(0, this.k * a.itemSize);
     }
     this.k = 0;
+  }
+  get count(): number {
+    return this.geo.instanceCount;
   }
   dispose(): void {
     this.geo.dispose();
@@ -372,39 +447,56 @@ function bowPts(a: THREE.Vector3, b: THREE.Vector3, k: number, n = 24): THREE.Ve
   return out;
 }
 
+
+/** The stone's wash: the seat's own base colour. */
+function lacquer(tile: RGB): RGB {
+  return [tile[0], tile[1], tile[2]];
+}
+
 export class TokenSystem {
   group = new THREE.Group();
+  private stones: Instanced;
   private figs: Instanced;
   private blots: Instanced;
+  private stoneMat: THREE.ShaderMaterial;
   private figMat: THREE.ShaderMaterial;
   private blotMat: THREE.ShaderMaterial;
   private atlas: THREE.Texture | null = null;
-  /** Resolves once the sprite atlas has loaded (the board waits for it before its first frame). */
+  /** Resolves once the fight figures' sprite atlas has loaded. */
   ready: Promise<void>;
-  /** Figure height / half-width (board units, at size scale 1) per denomination. */
   readonly figH = FIG_H;
   readonly figHalfW = FIG_H.map((h, i) => (h * ASPECT[i]) / 2);
   private toks = new Map<TerritoryId, Tok>();
   private list: Tok[] = [];
   private movers: Traveler[] = [];
-  private dots: Dot[] = [];
   private dirty = true;
   materials: THREE.Material[] = [];
-  /** Size multiplier from the UI text size (bigger numbers need a bigger figure). */
+  /** Size multiplier from the UI text size. */
   sizeScale = 1;
-  /** Phones: figures a little larger than their share of the map, so they stay legible. */
+  /** Phones: the fight figures a little larger than their share of the map. */
   figBoost = 1;
-  /** Reduced motion: counts change in place — figures fade in / out, no hops, leans, smoke or dots. */
+  /** Reduced motion: counts change in place — stones fade, nothing swells, slides or dries in patches. */
   reduced = false;
-  /** Camera azimuth / pitch (deg): the figures face the camera; this orders them and places the rings. */
+  /**
+   * The stone's diameter at the home view, CSS px: `dminPx` for 1 army, `dmaxPx` at 30+; and board units per
+   * CSS px there (index.ts sets all three on layout). Pieces scale with the zoom.
+   */
+  dminPx = 14;
+  dmaxPx = 36;
+  pxUnit = 1 / 12.7;
+  /** Kept for callers of the old stack API: the disc size fields. */
+  discPx = 36;
+  thinPx = 0;
   private camAz = 0;
-  private camPitch = 80;
+  private camPitch = 84;
   private right = new THREE.Vector3(1, 0, 0);
-  private up = new THREE.Vector3(0, 0.17, -0.98);
+  private up = new THREE.Vector3(0, 0.1, -0.99);
   private p = new THREE.Vector3();
   private last = new Float32Array(0);
-  private order: Tok[] = [];
-  /** Called when placed ink first touches the blot (number re-ink, sound). */
+  private fight = new Set<TerritoryId>();
+  /** Per-territory caps on the diameter, CSS px at the home view (index.ts fitCaps). */
+  private caps = new Map<TerritoryId, number>();
+  /** Called as a placed army's wash first touches the stone (the wood click). */
   onContact: ((id: TerritoryId) => void) | null = null;
 
   constructor(
@@ -412,6 +504,22 @@ export class TokenSystem {
     private tiles: TileSet,
     noise?: THREE.Texture,
   ) {
+    const common = {
+      transparent: true,
+      premultipliedAlpha: true,
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    } as const;
+    this.stoneMat = new THREE.ShaderMaterial({
+      uniforms: { uNoise: { value: noise ?? null }, uPaper: { value: new THREE.Vector3(0.063, 0.102, 0.188) } },
+      vertexShader: STONE_VERT,
+      fragmentShader: STONE_FRAG,
+      ...common,
+    });
     this.figMat = new THREE.ShaderMaterial({
       uniforms: {
         uAtlas: { value: null },
@@ -422,30 +530,15 @@ export class TokenSystem {
       },
       vertexShader: FIG_VERT,
       fragmentShader: FIG_FRAG,
-      transparent: true,
-      premultipliedAlpha: true,
-      blending: THREE.CustomBlending,
-      blendSrc: THREE.OneFactor,
-      blendDst: THREE.OneMinusSrcAlphaFactor,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
+      ...common,
     });
     this.blotMat = new THREE.ShaderMaterial({
       uniforms: { uNoise: { value: noise ?? null } },
       vertexShader: BLOT_VERT,
       fragmentShader: BLOT_FRAG,
-      transparent: true,
-      premultipliedAlpha: true,
-      blending: THREE.CustomBlending,
-      blendSrc: THREE.OneFactor,
-      blendDst: THREE.OneMinusSrcAlphaFactor,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
+      ...common,
     });
-    this.materials.push(this.figMat, this.blotMat);
-    // The smoke pigment (Phase 0); until it lands (or if it fails) the smoke curls with the value noise.
+    this.materials.push(this.stoneMat, this.figMat, this.blotMat);
     if (typeof document !== 'undefined')
       void loadTexmap('smoke').then((t) => {
         if (!t) return;
@@ -453,16 +546,17 @@ export class TokenSystem {
         this.figMat.uniforms.uSmokeOn.value = 1;
         this.dirty = true;
       });
-    const figQuad = new THREE.PlaneGeometry(1, 1);
-    figQuad.translate(0, 0.5, 0);
-    this.figs = new Instanced(figQuad, { iPos: 3, iSize: 2, iUV: 4, iA: 4, iB: 4, iC: 4, iOff: 2 }, FIG_CAP, this.figMat);
+    const flat = new THREE.PlaneGeometry(1, 1);
+    this.stones = new Instanced(flat, { iPos: 3, iSize: 4, iCol: 4, iDeep: 3, iFx: 4 }, STONE_CAP, this.stoneMat);
+    const quad = new THREE.PlaneGeometry(1, 1);
+    quad.translate(0, 0.5, 0);
+    this.figs = new Instanced(quad, { iPos: 3, iSize: 2, iUV: 4, iA: 4, iB: 4, iC: 4, iOff: 2 }, FIG_CAP, this.figMat);
     const blotQuad = new THREE.PlaneGeometry(1, 1);
     this.blots = new Instanced(blotQuad, { iPos: 3, iR: 3, iCol: 4, iK: 2 }, BLOT_CAP, this.blotMat);
-    // Drawn over the paper and the washes (depth test off: the board is flat), the figures after their
-    // blots and before the gold stroke (renderOrder 20).
     this.blots.mesh.renderOrder = 8;
-    this.figs.mesh.renderOrder = 9;
-    this.group.add(this.blots.mesh, this.figs.mesh);
+    this.stones.mesh.renderOrder = 9;
+    this.figs.mesh.renderOrder = 10;
+    this.group.add(this.blots.mesh, this.stones.mesh, this.figs.mesh);
 
     this.ready = new Promise<void>((resolve) => {
       const base = (import.meta.env?.BASE_URL as string | undefined) ?? './';
@@ -494,21 +588,25 @@ export class TokenSystem {
       const a = tiles.get(id).anchorW;
       const t: Tok = {
         id,
-        blot: [0.4, 0.4, 0.4],
+        col: [0.4, 0.4, 0.4],
         deep: [0.3, 0.3, 0.3],
         n: 0,
+        shown: 0,
+        disp: 0,
+        alpha: 0,
+        dry: 0,
+        soak: 0,
+        preview: null,
+        fig: 0,
         denom: 0,
-        scale: 0,
         reveal: 1,
-        old: null,
-        smoke: 0,
+        figOld: null,
+        figSmoke: 0,
         puff: 0,
-        fade: 1,
-        offX: 0,
-        offY: 0,
+        figOffX: 0,
+        figOffY: 0,
         lean: 0,
         flip: 1,
-        ink: 0,
         frozen: null,
         pendingColor: null,
         ver: {},
@@ -521,13 +619,32 @@ export class TokenSystem {
       this.toks.set(id, t);
       this.list.push(t);
     }
-    this.order = [...this.list];
     this.last = new Float32Array(this.list.length * 4);
   }
 
-  /** Blot radius (board units) at the current UI scale — the piece's nominal radius. */
+  // --- sizes ----------------------------------------------------------------------------------------
+
+  /** A stone's diameter at the home view (CSS px) for a count on a territory, its cap applied. */
+  diamPx(n: number, id?: TerritoryId): number {
+    if (n <= 0) return 0;
+    const d = stoneK(n, this.dminPx, this.dmaxPx) * this.sizeScale;
+    const cap = id ? this.caps.get(id) : undefined;
+    return cap !== undefined ? Math.min(d, Math.max(this.dminPx * this.sizeScale, cap)) : d;
+  }
+  /** Its radius in board units. */
+  radiusFor(n: number, id?: TerritoryId): number {
+    return (this.diamPx(n, id) / 2) * this.pxUnit;
+  }
+  /** The nominal piece radius (board units): a 30-army stone. */
   get radius(): number {
-    return TOKEN_R * this.sizeScale;
+    return (this.dmaxPx * this.sizeScale * this.pxUnit) / 2;
+  }
+  setCaps(caps: Map<TerritoryId, number>): void {
+    this.caps = caps;
+    this.dirty = true;
+  }
+  capOf(id?: TerritoryId): number {
+    return id ? (this.caps.get(id) ?? this.dmaxPx * this.sizeScale) : this.dmaxPx * this.sizeScale;
   }
   private get figScale(): number {
     return this.sizeScale * this.figBoost;
@@ -536,21 +653,16 @@ export class TokenSystem {
   get travelers(): readonly TokenTraveler[] {
     return this.movers;
   }
-
   get animating(): boolean {
-    return this.movers.length > 0 || this.dots.length > 0;
+    return this.movers.length > 0;
   }
-
   markDirty(): void {
     this.dirty = true;
   }
-
-  /** Instance data waits for the next update() (the render-on-demand loop must draw). */
   get needsUpdate(): boolean {
     return this.dirty;
   }
 
-  /** The camera pose the figures face (deg). Cheap; only re-lays out on change. */
   setView(azDeg: number, pitchDeg: number): void {
     if (Math.abs(azDeg - this.camAz) < 0.01 && Math.abs(pitchDeg - this.camPitch) < 0.01) return;
     this.camAz = azDeg;
@@ -562,90 +674,79 @@ export class TokenSystem {
     this.dirty = true;
   }
 
-  /** The blot: the owner's wash, deepened, so the ivory figure has ground on its own tile. */
   static fill(tile: RGB): RGB {
-    return deepOf(tile);
+    return lacquer(tile);
   }
-  /** Kept for callers of the old API: the figure's dark ink is the owner's deep colour. */
   static paint(tile: RGB): RGB {
     return deepOf(tile);
   }
 
   setColor(id: TerritoryId, tileColor: RGB): void {
     const t = this.toks.get(id)!;
-    const d = deepOf(tileColor);
-    const c = { blot: d, deep: d };
+    const c = { col: lacquer(tileColor), deep: deepOf(tileColor) };
     if (t.frozen) t.pendingColor = c;
     else {
-      t.blot = c.blot;
+      t.col = c.col;
       t.deep = c.deep;
     }
     this.dirty = true;
   }
 
-  /** Where a territory's figure stands on the paper (world, un-lifted): the strokes run between these. */
   feet(id: TerritoryId, out = new THREE.Vector3()): THREE.Vector3 {
     const a = this.tiles.get(id).anchorW;
-    return out.set(a.x - FIG_SHIFT * this.figScale, TILE_TOP, a.z);
+    return out.set(a.x, TILE_TOP, a.z);
   }
-
-  /** The figure's feet (world), refreshed each frame. */
   top(id: TerritoryId): THREE.Vector3 {
     return this.toks.get(id)!.top;
   }
-  /** Where the count ring hangs from (world): the feet; the overlay sets it beside the figure on screen. */
   plaquePoint(id: TerritoryId): THREE.Vector3 {
     return this.toks.get(id)!.plaque;
   }
-  /** Top of the figure (world). */
+  /** The stone's centre (world): where its numeral sits. */
   figTop(id: TerritoryId): THREE.Vector3 {
     return this.toks.get(id)!.figTop;
   }
-  /** Half the figure's width (world units, at rest). */
+  /** The stone's radius (world), as drawn now. */
   halfWidth(id: TerritoryId): number {
     return this.toks.get(id)!.halfW;
   }
   denom(id: TerritoryId): Denom {
     return this.toks.get(id)!.denom;
   }
-  /** Facing (1 = right, −1 = left). */
   facing(id: TerritoryId): number {
     return this.toks.get(id)!.flip;
   }
-  /** Drawn presence (for the ring): 0 = hidden. The ring stays while the figure smokes, then goes. */
+  shownCount(id: TerritoryId): number {
+    return this.toks.get(id)!.shown;
+  }
+  /** Test hook: the stone a territory is drawn with (its count, diameter at home, cap). */
+  stoneOf(id: TerritoryId): { n: number; dPx: number; capPx: number; alpha: number } {
+    const t = this.toks.get(id)!;
+    return { n: t.shown, dPx: this.diamPx(t.shown, id), capPx: this.capOf(id), alpha: t.alpha };
+  }
+  /** Kept for the old test hook name. */
+  stackOf(id: TerritoryId): { n: number; thick: number; thin: number; alpha: number; heightPx: number } {
+    const t = this.toks.get(id)!;
+    return { n: t.shown, ...discsOf(t.shown), alpha: t.alpha, heightPx: this.diamPx(t.shown, id) };
+  }
   visual(id: TerritoryId): number {
     const t = this.toks.get(id)!;
-    return t.scale * Math.min(1, t.fade * 1.4) * (t.smoke > 0.5 ? Math.max(0, 1 - (t.smoke - 0.5) * 2) : 1);
+    if (t.shown <= 0) return 0;
+    return t.alpha * (1 - Math.max(0, t.dry - 0.3) * 1.4);
   }
-  /** Fresh anchor on the tile (not last frame's), for getScreenPosition: always on the territory's own tile. */
   freshTop(id: TerritoryId, out: THREE.Vector3): THREE.Vector3 {
     const tile = this.tiles.get(id);
     return out.set(tile.anchorW.x, tile.pivot.position.y + TILE_TOP, tile.anchorW.z);
   }
 
-  /**
-   * World points bounding every piece at the home camera (azimuth 0, `pitchDeg`), four per piece — the
-   * figure's top first (camera.ts gives figures their own clearance), then its left and right, then the
-   * lowest point of the piece (`plaqueUnits` below the feet: the ring and the blot). For the home fit.
-   */
-  extentPoints(pitchDeg: number, plaqueUnits: number, denom: Denom | null = null, ringUnits = 2.4 * this.sizeScale): number[][] {
-    const pr = (pitchDeg * Math.PI) / 180;
-    const ux = 0;
-    const uy = Math.cos(pr);
-    const uz = -Math.sin(pr);
-    const k = this.figScale;
-    const tallest = denom ?? 0; // the soldier is the tallest figure, the cannon the widest
-    const h = FIG_H[tallest] * k;
-    const hw = FIG_H[2] * ASPECT[2] * 0.5 * k;
-    const ring = ringUnits; // the ring beside the figure (~30 px at the 1440 home)
+  /** World points bounding every piece at the home camera, four per piece: north, west, east, south of a full stone. */
+  extentPoints(_pitchDeg: number, _plaqueUnits: number, _denom: Denom | null = null, _ringUnits = 0): number[][] {
+    const R = this.radius;
     const out: number[][] = [];
     for (const t of this.list) {
       const a = this.tiles.get(t.id).anchorW;
-      const fx = a.x - FIG_SHIFT * k;
       const y0 = TILE_TOP;
-      out.push([fx + ux * h, y0 + uy * h, a.z + uz * h]);
-      out.push([fx - hw, y0, a.z], [fx + hw + ring, y0, a.z]);
-      out.push([a.x, y0 - uy * plaqueUnits, a.z - uz * plaqueUnits]);
+      out.push([a.x, y0, a.z - R], [a.x - R, y0, a.z], [a.x + R, y0, a.z], [a.x, y0, a.z + R]);
     }
     return out;
   }
@@ -668,33 +769,18 @@ export class TokenSystem {
       },
     });
   }
-
   private cancel(t: Tok, keys: string[]): void {
     for (const k of keys) t.ver[k] = (t.ver[k] ?? 0) + 1;
   }
-
-  private rest(t: Tok): void {
-    t.reveal = 1;
-    t.old = null;
-    t.smoke = 0;
-    t.puff = 0;
-    t.fade = 1;
-    t.offX = 0;
-    t.offY = 0;
-    t.ink = 0;
-    this.unfreeze(t);
-  }
-
   private unfreeze(t: Tok): void {
     t.frozen = null;
     if (t.pendingColor) {
-      t.blot = t.pendingColor.blot;
+      t.col = t.pendingColor.col;
       t.deep = t.pendingColor.deep;
       t.pendingColor = null;
     }
   }
 
-  /** Screen-plane direction (right, up components, unit) from territory a toward b. */
   private screenDir(from: TerritoryId, to: TerritoryId | null | undefined): [number, number] {
     if (to && to !== from) {
       const a = this.tiles.get(from).anchorW;
@@ -709,7 +795,37 @@ export class TokenSystem {
     return [1, 0];
   }
 
-  /** Turn a figure to face another territory (its last target, or its attacker). */
+  // --- the fight figures -------------------------------------------------------------------------------
+
+  setFight(pair: TerritoryId[] | null): void {
+    const next = new Set(pair ?? []);
+    for (const t of this.list) {
+      const want = next.has(t.id) && t.shown > 0 ? 1 : 0;
+      const had = this.fight.has(t.id);
+      if (want && !had) {
+        t.denom = denomOf(t.shown);
+        t.figSmoke = 0;
+        t.puff = 0;
+        this.cancel(t, ['figSmoke']);
+        if (this.reduced || this.anim.instant) {
+          t.fig = 1;
+          t.reveal = 1;
+        } else {
+          const from = t.fig;
+          t.reveal = from > 0.5 ? 1 : 0;
+          this.tw(t, 'fig', { ms: 180, ease: ease.outQuad, update: (v) => (t.fig = from + (1 - from) * v) });
+          if (t.reveal < 1) this.tw(t, 'reveal', { ms: 240, ease: (x) => 1 - Math.pow(1 - x, 1.6), update: (v) => (t.reveal = v), done: () => (t.reveal = 1) });
+        }
+      } else if (!next.has(t.id) && (had || t.fig > 0)) {
+        const from = t.fig;
+        if (this.reduced || this.anim.instant) t.fig = 0;
+        else this.tw(t, 'fig', { ms: 300, ease: ease.inQuad, update: (v) => (t.fig = from * (1 - v)), done: () => (t.lean = 0) });
+      }
+    }
+    this.fight = next;
+    this.dirty = true;
+  }
+
   face(id: TerritoryId, other: TerritoryId | null): void {
     if (!other) return;
     const t = this.toks.get(id)!;
@@ -722,10 +838,6 @@ export class TokenSystem {
     }
   }
 
-  /**
-   * The attack's lean (B §4): both figures turn to face each other and the attacker leans a little toward
-   * its target while the dice roll; `on = false` straightens it (140 ms).
-   */
   lean(from: TerritoryId, to: TerritoryId, on: boolean): void {
     const t = this.toks.get(from)!;
     this.face(from, to);
@@ -741,313 +853,10 @@ export class TokenSystem {
     this.tw(t, 'lean', { ms: on ? 180 : 140, ease: on ? ease.outCubic : ease.inOutQuad, update: (v) => (t.lean = from0 + (goal - from0) * v) });
   }
 
-  // --- ink dots ------------------------------------------------------------------------------------
-
-  private placeDots(t: Tok, count: number, run: Run | null): number {
-    if (this.reduced || this.anim.instant) return 0;
-    const alive = this.dots.filter((d) => d.kind === 'place').length;
-    const n = Math.max(0, Math.min(count, MAX_PLACE_DOTS - alive, 6));
-    const a = this.tiles.get(t.id).anchorW;
-    const k = this.figScale;
-    const fx = a.x - FIG_SHIFT * k;
-    for (let i = 0; i < n; i++) {
-      const ang = (i / Math.max(1, n)) * Math.PI * 2 + t.seed * 6.28 + Math.random() * 0.6;
-      const rr = (0.25 + Math.random() * 0.55) * TOKEN_R * k;
-      this.spawn({
-        x: fx + Math.cos(ang) * rr,
-        z: a.z + Math.sin(ang) * rr * 0.6,
-        y: TILE_TOP,
-        vx: 0,
-        vz: 0,
-        h: 2.6 + Math.random() * 1.2,
-        r: (0.2 + Math.random() * 0.1) * k,
-        t: 0,
-        ms: 300,
-        delay: i * 40,
-        kind: 'place',
-        color: t.deep,
-        alive: true,
-      });
-    }
-    void run;
-    return n;
-  }
-
-  private splash(t: Tok, away: [number, number]): void {
-    if (this.reduced || this.anim.instant) return;
-    const a = this.tiles.get(t.id).anchorW;
-    const k = this.figScale;
-    const fx = a.x - FIG_SHIFT * k;
-    // world direction of the blow's far side
-    const wx = away[0] * this.right.x + away[1] * this.up.x;
-    const wz = away[0] * this.right.z + away[1] * this.up.z;
-    const wl = Math.hypot(wx, wz) || 1;
-    const n = 5;
-    for (let i = 0; i < n; i++) {
-      const spread = (i / (n - 1) - 0.5) * 1.6 + (Math.random() - 0.5) * 0.4;
-      const c = Math.cos(spread);
-      const s = Math.sin(spread);
-      const dx = (wx / wl) * c - (wz / wl) * s;
-      const dz = (wx / wl) * s + (wz / wl) * c;
-      const sp = (1.1 + Math.random() * 1.2) * k;
-      this.spawn({
-        x: fx + dx * 0.25 * k,
-        z: a.z + dz * 0.25 * k + FIG_H[t.denom] * k * 0.12,
-        y: TILE_TOP,
-        vx: dx * sp,
-        vz: dz * sp,
-        h: 0,
-        r: (0.07 + Math.random() * 0.09) * k,
-        t: 0,
-        ms: 300,
-        delay: 0,
-        kind: 'splash',
-        color: [t.deep[0] * 0.55, t.deep[1] * 0.55, t.deep[2] * 0.6],
-        alive: true,
-      });
-    }
-  }
-
-  private spawn(d: Dot): void {
-    if (this.dots.length >= MAX_DOTS) return;
-    this.dots.push(d);
-    this.dirty = true;
-    void this.anim.tween({
-      ms: d.ms + d.delay,
-      ease: ease.linear,
-      update: (_v, raw) => {
-        const tms = raw * (d.ms + d.delay);
-        d.t = Math.max(0, (tms - d.delay) / d.ms);
-        this.dirty = true;
-      },
-      done: () => {
-        d.alive = false;
-        this.dots = this.dots.filter((x) => x !== d);
-        this.dirty = true;
-      },
-    });
-  }
-
-  /**
-   * Change a territory's count. mode:
-   * - 'snap'  no motion (sync, deal)
-   * - 'drop'  placement: ink dots fall and soak; a new figure is drawn in, an existing one re-inks and hops
-   * - 'lift'  armies leave (march start / unplace): a small lift, or it dries away if it empties
-   * - 'hit'   dice losses: a recoil away from `other` and a tiny splash; at 0 it dissolves as smoke
-   * - 'land'  a traveller arrived: a settle step (appears at once if the tile was empty)
-   * - 'out'   leave the board (conquered): smoke, if the figure is still standing
-   */
-  setArmies(
-    id: TerritoryId,
-    n: number,
-    mode: 'snap' | 'drop' | 'lift' | 'hit' | 'land' | 'out',
-    run: Run | null = null,
-    other: TerritoryId | null = null,
-  ): void {
-    const t = this.toks.get(id)!;
-    const wasShown = t.scale > 0.5 && t.n > 0 && t.smoke < 0.05;
-    const prevN = t.n;
-    const prevDenom = t.denom;
-    t.n = n;
-    const nextDenom = n > 0 ? denomOf(n) : prevDenom;
-    this.dirty = true;
-    const instant = this.anim.instant || (run && run.skipped);
-    if (mode === 'snap' || instant) {
-      this.cancel(t, ['scale', 'reveal', 'old', 'smoke', 'fade', 'off', 'ink', 'lean', 'puff']);
-      this.rest(t);
-      t.lean = 0;
-      t.scale = n > 0 ? 1 : 0;
-      t.denom = nextDenom;
-      if (mode === 'drop' && instant) this.onContact?.(id);
-      return;
-    }
-    if (this.reduced) {
-      // Steady: the figure fades in / out, and a new denomination crossfades over the old. No motion.
-      if (mode === 'drop') this.onContact?.(id);
-      this.cancel(t, ['off', 'ink', 'lean', 'smoke', 'reveal']);
-      t.offX = t.offY = t.lean = t.ink = t.smoke = 0;
-      t.reveal = 1;
-      if (n <= 0 || mode === 'out') {
-        if (t.scale <= 0.001) return;
-        t.frozen = t.frozen ?? { blot: t.blot, deep: t.deep };
-        const from = t.fade;
-        this.tw(t, 'fade', {
-          ms: 150,
-          run,
-          update: (v) => (t.fade = from * (1 - v)),
-          done: () => {
-            t.scale = 0;
-            t.fade = 1;
-            this.unfreeze(t);
-          },
-        });
-        return;
-      }
-      if (!wasShown) {
-        this.cancel(t, ['old']);
-        t.old = null;
-        t.denom = nextDenom;
-        t.scale = 1;
-        t.fade = 0;
-        this.unfreeze(t);
-        this.tw(t, 'fade', { ms: 150, run, update: (v) => (t.fade = v), done: () => (t.fade = 1) });
-        return;
-      }
-      if (nextDenom !== prevDenom) {
-        t.old = { denom: prevDenom, dry: 0 };
-        t.denom = nextDenom;
-        t.reveal = 0;
-        this.tw(t, 'old', {
-          ms: 150,
-          run,
-          update: (v) => {
-            if (t.old) t.old.dry = v;
-            t.reveal = v;
-          },
-          done: () => {
-            t.old = null;
-            t.reveal = 1;
-          },
-        });
-      }
-      return;
-    }
-    if (n <= 0 || mode === 'out') {
-      if (!wasShown && t.scale <= 0.001) {
-        t.scale = 0;
-        return;
-      }
-      this.cancel(t, ['old', 'ink', 'puff']);
-      t.puff = 0;
-      t.old = null;
-      t.ink = 0;
-      t.frozen = t.frozen ?? { blot: t.blot, deep: t.deep };
-      if (mode === 'hit' || mode === 'out') {
-        if (t.smoke > 0) return; // already smoking
-        // The fall (B §4 "defender falls", 320 ms): a last recoil, then the figure lifts off as ink smoke.
-        if (mode === 'hit' && other) this.splash(t, this.screenDir(other, id));
-        this.cancel(t, ['fade', 'reveal']);
-        t.reveal = 1;
-        t.fade = 1;
-        this.tw(t, 'smoke', {
-          ms: 420,
-          ease: ease.outQuad,
-          run,
-          update: (v) => (t.smoke = v * 1.02),
-          done: () => {
-            this.cancel(t, ['off', 'lean']);
-            t.scale = 0;
-            t.smoke = 0;
-            t.offX = t.offY = t.lean = 0;
-            this.unfreeze(t);
-          },
-        });
-        return;
-      }
-      // lift away (unplace / everything marched out): the figure dries off the paper
-      const from = t.fade;
-      this.tw(t, 'fade', {
-        ms: 170,
-        ease: ease.inQuad,
-        run,
-        update: (v) => {
-          t.fade = from * (1 - v);
-          t.offY = 0.3 * v;
-        },
-        done: () => {
-          t.scale = 0;
-          t.offY = 0;
-          t.fade = 1;
-          this.unfreeze(t);
-        },
-      });
-      return;
-    }
-    // n > 0 from here
-    if (!wasShown) {
-      // Appear: drawn in feet → head (placement), or at once (a traveller became it).
-      this.cancel(t, ['scale', 'smoke', 'fade', 'old', 'reveal', 'off', 'lean', 'puff']);
-      this.rest(t);
-      t.lean = 0;
-      t.denom = nextDenom;
-      t.scale = 1;
-      if (mode === 'drop') {
-        const dots = this.placeDots(t, Math.max(1, n - prevN), run);
-        t.reveal = 0;
-        this.tw(t, 'reveal', { ms: 280, delay: dots ? 90 : 0, ease: (x) => 1 - Math.pow(1 - x, 1.6), run, update: (v) => (t.reveal = v) });
-        const touch = () => this.onContact?.(id);
-        if (dots) void this.anim.wait(120, run).then(touch);
-        else touch();
-      } else if (mode === 'land') this.step(t, run, 0.22);
-      return;
-    }
-    this.cancel(t, ['scale']);
-    t.scale = 1;
-    if (t.smoke > 0) {
-      // a figure mid-fall came back (a drift correction): stand it up
-      this.cancel(t, ['smoke', 'fade']);
-      t.smoke = 0;
-      t.fade = 1;
-      this.unfreeze(t);
-    }
-    if (nextDenom !== prevDenom) this.swap(t, prevDenom, nextDenom, run);
-    switch (mode) {
-      case 'drop': {
-        const dots = this.placeDots(t, Math.max(1, n - prevN), run);
-        const reink = () => {
-          this.onContact?.(id);
-          this.tw(t, 'ink', { ms: 300, update: (v) => (t.ink = Math.sin(v * Math.PI) * (1 - v * 0.3)), done: () => (t.ink = 0) });
-          if (nextDenom === prevDenom) this.step(t, run, 0.24);
-        };
-        if (dots) void this.anim.wait(120, run).then(reink);
-        else reink();
-        break;
-      }
-      case 'lift':
-        this.step(t, run, 0.2);
-        break;
-      case 'hit': {
-        // recoil: knocked back away from the blow, a tiny splash, and back
-        const [r, u] = this.screenDir(other ?? id, id);
-        this.splash(t, [r, u]);
-        const k = this.figScale;
-        this.tw(t, 'off', {
-          ms: 260,
-          ease: ease.linear,
-          update: (v) => {
-            const e = v < 0.25 ? ease.outQuad(v / 0.25) : 1 - ease.inOutQuad((v - 0.25) / 0.75);
-            t.offX = r * 0.32 * k * e;
-            t.offY = u * 0.2 * k * e;
-          },
-          done: () => {
-            t.offX = 0;
-            t.offY = 0;
-          },
-        });
-        const l0 = t.lean;
-        const back = (r >= 0 ? 1 : -1) * 0.16;
-        this.tw(t, 'lean', {
-          ms: 260,
-          update: (v) => (t.lean = l0 * (1 - v) + back * Math.sin(Math.min(1, v * 1.4) * Math.PI) * (1 - v * 0.4)),
-          done: () => (t.lean = 0),
-        });
-        break;
-      }
-      case 'land':
-        this.step(t, run, 0.18);
-        break;
-    }
-  }
-
-  /**
-   * The verdict's puff (INK2 §2.2): a side that lost a die breathes out a little ink smoke over the
-   * verdict's `ms` (0 → 0.3 → 0) and settles. A figure that is falling (or gone) keeps its dissolve.
-   * Reduced motion: none.
-   */
   puff(id: TerritoryId, ms: number, run: Run | null = null): void {
     const t = this.toks.get(id);
     if (!t || this.reduced || this.anim.instant || (run && run.skipped)) return;
-    if (t.n <= 0 || t.scale <= 0.001 || t.smoke > 0) return;
+    if (t.fig <= 0.01 || t.shown <= 0 || t.figSmoke > 0) return;
     this.tw(t, 'puff', {
       ms,
       ease: ease.linear,
@@ -1057,49 +866,204 @@ export class TokenSystem {
     });
   }
 
-  /** Denomination change: the old figure dries out (160) as the new one is drawn in, feet → head (280). */
-  private swap(t: Tok, from: Denom, to: Denom, run: Run | null): void {
-    t.old = { denom: from, dry: 0 };
-    t.denom = to;
-    t.reveal = 0;
-    this.tw(t, 'old', {
-      ms: 160,
-      ease: ease.inQuad,
-      run,
-      update: (v) => {
-        if (t.old) t.old.dry = v;
-      },
-      done: () => (t.old = null),
-    });
-    this.tw(t, 'reveal', { ms: 280, delay: 90, ease: (x) => 1 - Math.pow(1 - x, 1.6), run, update: (v) => (t.reveal = v), done: () => (t.reveal = 1) });
-  }
-
-  /** A small hop (screen up and back). */
-  private step(t: Tok, run: Run | null, amt: number): void {
+  private figHit(t: Tok, other: TerritoryId | null, fall: boolean): void {
+    if (t.fig <= 0.01 || this.reduced) return;
+    if (fall) {
+      if (t.figSmoke > 0) return;
+      this.tw(t, 'figSmoke', { ms: 420, ease: ease.outQuad, update: (v) => (t.figSmoke = v * 1.02), done: () => (t.fig = 0) });
+      return;
+    }
+    const [r, u] = this.screenDir(other ?? t.id, t.id);
     const k = this.figScale;
-    this.tw(t, 'off', {
-      ms: 180,
-      run,
+    this.tw(t, 'figOff', {
+      ms: 260,
       update: (v) => {
-        t.offY = amt * k * Math.sin(v * Math.PI) * (1 - 0.2 * v);
-        t.offX = 0;
+        const e = v < 0.25 ? ease.outQuad(v / 0.25) : 1 - ease.inOutQuad((v - 0.25) / 0.75);
+        t.figOffX = r * 0.32 * k * e;
+        t.figOffY = u * 0.2 * k * e;
       },
-      done: () => (t.offY = 0),
+      done: () => {
+        t.figOffX = 0;
+        t.figOffY = 0;
+      },
+    });
+    const l0 = t.lean;
+    const back = (r >= 0 ? 1 : -1) * 0.16;
+    this.tw(t, 'lean', {
+      ms: 260,
+      update: (v) => (t.lean = l0 * (1 - v) + back * Math.sin(Math.min(1, v * 1.4) * Math.PI) * (1 - v * 0.4)),
+      done: () => (t.lean = 0),
     });
   }
 
-  /** A count changed with no motion of its own: the figure re-inks briefly. */
-  pop(id: TerritoryId, amt = 0.12): void {
-    const t = this.toks.get(id)!;
-    if (this.anim.instant || this.reduced || t.scale <= 0) return;
-    void amt;
-    this.tw(t, 'ink', { ms: 240, update: (v) => (t.ink = 0.8 * Math.sin(v * Math.PI)), done: () => (t.ink = 0) });
+  // --- the stone's motion ---------------------------------------------------------------------------------
+
+  /** The stone's size goes from its current count to `to` (a swell with a little give, or a shrink). */
+  private resize(t: Tok, to: number, ms: number, run: Run | null, overshoot = 0): void {
+    const from = t.disp;
+    this.tw(t, 'size', {
+      ms,
+      ease: ease.outCubic,
+      run,
+      update: (v) => {
+        const o = overshoot * Math.sin(Math.PI * v) * (1 - v);
+        t.disp = from + (to - from) * v + o * Math.max(1, to);
+      },
+      done: () => (t.disp = to),
+    });
+  }
+
+  /** Dry back to paper over `ms`, then leave. */
+  private dryOut(t: Tok, ms: number, run: Run | null): void {
+    t.frozen = t.frozen ?? { col: t.col, deep: t.deep };
+    this.cancel(t, ['size']);
+    this.tw(t, 'dry', {
+      ms,
+      ease: ease.inOutSine,
+      run,
+      update: (v) => (t.dry = v),
+      done: () => {
+        if (t.n > 0) return;
+        t.shown = 0;
+        t.disp = 0;
+        t.alpha = 0;
+        t.dry = 0;
+        this.unfreeze(t);
+      },
+    });
   }
 
   /**
-   * A traveller figure carrying `count` walks from a to b — along the attack arrow's bow for a conquest,
-   * through `viaIds` for a fortify route. Resolves on arrival. (`arc` < 1 = a route walk, else the arrow.)
+   * Change a territory's count. mode:
+   * - 'snap'  no motion (sync, deal)
+   * - 'drop'  placement: the stone swells as the wash soaks in; the wood click lands as it starts
+   * - 'lift'  armies leave (march start / unplace): it shrinks
+   * - 'hit'   dice losses: it shrinks a step; at 0 it dries to paper (`topple`: the seat's last stone, slowly)
+   * - 'land'  a traveller arrived: it settles
+   * - 'out'   conquered: a stone still standing dries away
    */
+  setArmies(
+    id: TerritoryId,
+    n: number,
+    mode: 'snap' | 'drop' | 'lift' | 'hit' | 'land' | 'out',
+    run: Run | null = null,
+    other: TerritoryId | null = null,
+    o: { topple?: boolean; unplace?: boolean } = {},
+  ): void {
+    const t = this.toks.get(id)!;
+    const prev = t.shown;
+    t.n = Math.max(0, n);
+    this.dirty = true;
+    const instant = this.anim.instant || (run && run.skipped);
+    if (mode === 'snap' || instant) {
+      this.cancel(t, ['size', 'dry', 'soak', 'alpha']);
+      t.shown = t.n;
+      t.disp = t.n;
+      t.alpha = t.n > 0 ? 1 : 0;
+      t.dry = 0;
+      t.soak = 0;
+      if (t.n > 0) this.unfreeze(t);
+      else t.fig = 0;
+      if (mode === 'drop' && instant) this.onContact?.(id);
+      return;
+    }
+    if (this.reduced) {
+      if (mode === 'drop') this.onContact?.(id);
+      if (t.n <= 0 || mode === 'out') {
+        if (t.alpha <= 0.001) return;
+        t.frozen = t.frozen ?? { col: t.col, deep: t.deep };
+        const a0 = t.alpha;
+        this.tw(t, 'alpha', {
+          ms: 150,
+          run,
+          update: (v) => (t.alpha = a0 * (1 - v)),
+          done: () => {
+            t.shown = 0;
+            t.disp = 0;
+            t.fig = 0;
+            this.unfreeze(t);
+          },
+        });
+        return;
+      }
+      t.shown = t.n;
+      t.disp = t.n;
+      if (prev <= 0 || t.alpha < 1) {
+        this.unfreeze(t);
+        const a0 = t.alpha;
+        this.tw(t, 'alpha', { ms: 150, run, update: (v) => (t.alpha = a0 + (1 - a0) * v), done: () => (t.alpha = 1) });
+      }
+      return;
+    }
+    if (t.n <= 0 || mode === 'out') {
+      if (prev <= 0 && t.alpha <= 0.001) {
+        t.shown = 0;
+        return;
+      }
+      if (mode === 'hit' || mode === 'out') this.figHit(t, other, true);
+      // the stone dries back to paper: 320 ms for a fall, ~1.2 s for a seat's last stone, 170 ms marched out
+      this.dryOut(t, o.topple ? 1200 : mode === 'lift' ? 170 : 320, mode === 'lift' ? run : null);
+      return;
+    }
+    // n > 0 from here
+    this.cancel(t, ['dry', 'alpha']);
+    t.dry = 0;
+    if (prev <= 0 || t.alpha < 0.999) {
+      this.unfreeze(t);
+      t.frozen = null;
+      if (prev <= 0) t.disp = 0;
+    }
+    t.alpha = 1;
+    t.shown = t.n;
+    switch (mode) {
+      case 'drop':
+        this.onContact?.(id);
+        this.resize(t, t.n, 180, run, 0.04);
+        this.tw(t, 'soak', { ms: 200, update: (v) => (t.soak = Math.sin(v * Math.PI) * (1 - v * 0.4)), done: () => (t.soak = 0) });
+        break;
+      case 'lift':
+        this.resize(t, t.n, o.unplace ? 170 : 150, run);
+        break;
+      case 'hit':
+        this.figHit(t, other, false);
+        this.resize(t, t.n, 200, run);
+        this.tw(t, 'soak', { ms: 240, update: (v) => (t.soak = 0.7 * Math.sin(v * Math.PI)), done: () => (t.soak = 0) });
+        break;
+      case 'land':
+        this.resize(t, t.n, 160, run, 0.03);
+        break;
+    }
+    if (t.fig > 0 && t.n > 0) {
+      const nd = denomOf(t.n);
+      if (nd !== t.denom) {
+        t.figOld = { denom: t.denom, dry: 0 };
+        t.denom = nd;
+        t.reveal = 0;
+        this.tw(t, 'figOld', { ms: 160, update: (v) => (t.figOld ? (t.figOld.dry = v) : undefined), done: () => (t.figOld = null) });
+        this.tw(t, 'reveal', { ms: 280, delay: 90, ease: (x) => 1 - Math.pow(1 - x, 1.6), update: (v) => (t.reveal = v), done: () => (t.reveal = 1) });
+      }
+    }
+  }
+
+  /** A count changed with no motion of its own: the wash deepens once. */
+  pop(id: TerritoryId, _amt = 0.12): void {
+    const t = this.toks.get(id)!;
+    if (this.anim.instant || this.reduced || t.shown <= 0) return;
+    this.tw(t, 'soak', { ms: 220, update: (v) => (t.soak = 0.6 * Math.sin(v * Math.PI)), done: () => (t.soak = 0) });
+  }
+
+  setPreview(totals: Partial<Record<TerritoryId, number>> | null): void {
+    for (const t of this.list) {
+      const v = totals?.[t.id];
+      const next = v === undefined || v === null ? null : Math.max(0, v);
+      if (next !== t.preview) {
+        t.preview = next;
+        this.dirty = true;
+      }
+    }
+  }
+
+  /** A stone carrying `count` slides from a to b along the stroke's bow (or the fortify route) and settles. */
   march(
     from: TerritoryId,
     to: TerritoryId,
@@ -1113,10 +1077,8 @@ export class TokenSystem {
     owner = '',
   ): Promise<void> {
     if (this.anim.instant || (run && run.skipped) || this.movers.length >= MAX_TRAVELERS) return Promise.resolve();
-    const k = this.figScale;
     const at = (id: TerritoryId) => {
       const v = this.tiles.get(id).anchorW.clone();
-      v.x -= FIG_SHIFT * k;
       v.y = TILE_TOP;
       return v;
     };
@@ -1125,16 +1087,12 @@ export class TokenSystem {
     let pts: THREE.Vector3[];
     if (viaIds.length) pts = [a, ...viaIds.map(at), b];
     else if (arc >= 1) {
-      // the conquest walks the arrow: step off the source's figure and walk its bow
       const d = Math.hypot(b.x - a.x, b.z - a.z);
-      const a2 = a.clone().lerp(b, Math.min(0.3, (0.9 * k) / Math.max(d, 0.001)));
+      const a2 = a.clone().lerp(b, Math.min(0.3, (this.radiusFor(count) * 1.2) / Math.max(d, 0.001)));
       pts = bowPts(a2, b, 0.14);
     } else pts = [a, b];
     const cum = [0];
     for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
-    const L = cum[cum.length - 1] || 1;
-    const denom = denomOf(count);
-    const d = deepOf(tileColor);
     const tr: Traveler = {
       n: count,
       ink,
@@ -1142,19 +1100,17 @@ export class TokenSystem {
       top: a.clone(),
       plaque: a.clone(),
       figTop: a.clone(),
-      halfW: this.figHalfW[denom] * k,
+      halfW: this.radiusFor(count),
       alive: true,
-      blotC: d,
-      deep: d,
+      col: lacquer(tileColor),
+      deep: deepOf(tileColor),
       pts,
       cum,
       t: 0,
-      denom,
-      steps: Math.max(2, Math.round(L / (0.9 * k))),
+      denom: denomOf(count),
       flip: 1,
       seed: Math.random(),
     };
-    // it faces where it walks
     const dx = b.x - a.x;
     const dz = b.z - a.z;
     tr.flip = dx * this.right.x + dz * this.right.z < 0 ? -1 : 1;
@@ -1174,24 +1130,30 @@ export class TokenSystem {
       .then(() => {
         tr.alive = false;
         this.movers = this.movers.filter((x) => x !== tr);
-        const tt = this.toks.get(to)!;
-        tt.flip = tr.flip;
+        this.toks.get(to)!.flip = tr.flip;
         this.dirty = true;
       });
   }
 
-  /** The point `f` (0..1) of the way along the running traveller from `from`, if one is walking. */
   travelerProgress(): number {
     return this.movers.length ? this.movers[this.movers.length - 1].t : 1;
   }
-
-  /** World position on the paper at a figure's feet (for effects). */
   dustPoint(id: TerritoryId, out: THREE.Vector3): THREE.Vector3 {
-    const t = this.toks.get(id)!;
-    return out.copy(t.top);
+    return out.copy(this.toks.get(id)!.top);
   }
 
   // --- per frame ----------------------------------------------------------------------------------
+
+  private writeStone(pos: THREE.Vector3, R: number, col: RGB, deep: RGB, alpha: number, o: { seed?: number; ghost?: boolean; dry?: number; soak?: number; dim?: number } = {}): void {
+    const s = this.stones;
+    if (!s.next() || alpha <= 0.002 || R <= 0) return;
+    s.set('iPos', pos.x, pos.y, pos.z);
+    s.set('iSize', R, o.seed ?? 0, o.ghost ? 1 : 0, o.dry ?? 0);
+    s.set('iCol', col[0], col[1], col[2], alpha);
+    s.set('iDeep', deep[0], deep[1], deep[2]);
+    s.set('iFx', 0, 0, o.soak ?? 0, o.dim ?? 0);
+    s.push();
+  }
 
   private writeFig(pos: THREE.Vector3, denom: Denom, k: number, alpha: number, reveal: number, smoke: number, dry: number, lean: number, flip: number, ink: number, seed: number, deep: RGB, dim: number, offX: number, offY: number): void {
     const f = this.figs;
@@ -1200,7 +1162,6 @@ export class TokenSystem {
     const h = FIG_H[denom] * k;
     f.set('iPos', pos.x, pos.y, pos.z);
     f.set('iSize', h * ASPECT[denom], h);
-    // texture v runs bottom → top (flipY): the sprite's feet are at its rect's bottom edge
     f.set('iUV', s.x / ATLAS.width, 1 - (s.y + s.h) / ATLAS.height, (s.x + s.w) / ATLAS.width, 1 - s.y / ATLAS.height);
     f.set('iA', alpha, reveal, smoke, dry);
     f.set('iB', lean, flip, ink, seed);
@@ -1209,20 +1170,18 @@ export class TokenSystem {
     f.push();
   }
 
-  private writeBlot(pos: THREE.Vector3, rx: number, rz: number, col: RGB, alpha: number, kind: number, seed: number): void {
+  private writeBlot(pos: THREE.Vector3, rx: number, rz: number, col: RGB, alpha: number, seed: number): void {
     const b = this.blots;
     if (!b.next() || alpha <= 0.002) return;
     b.set('iPos', pos.x, pos.y, pos.z);
     b.set('iR', rx, rz, 0);
     b.set('iCol', col[0], col[1], col[2], alpha);
-    b.set('iK', kind, seed);
+    b.set('iK', 0, seed);
     b.push();
   }
 
-  /** Write instance data. Cheap; uploads only when something changed. */
   update(): void {
     const L = this.last;
-    // Tile lifts and dims move figures without a figure tween: compare against last frame.
     for (let i = 0; i < this.list.length; i++) {
       const tile = this.tiles.get(this.list[i].id);
       const y = tile.pivot.position.y;
@@ -1234,40 +1193,35 @@ export class TokenSystem {
         this.dirty = true;
       }
     }
-    if (!this.dirty && !this.movers.length && !this.dots.length) return;
+    if (!this.dirty && !this.movers.length) return;
     this.dirty = false;
     const k = this.figScale;
-    const R = this.radius * this.figBoost;
-    const up = this.up;
-    // back to front: the far side of the board first (the camera looks toward −(sin az, cos az))
-    const az = (this.camAz * Math.PI) / 180;
-    const sa = Math.sin(az);
-    const ca = Math.cos(az);
-    this.order.sort((a, b) => {
-      const pa = this.tiles.get(a.id).anchorW;
-      const pb = this.tiles.get(b.id).anchorW;
-      return pa.x * sa + pa.z * ca - (pb.x * sa + pb.z * ca);
-    });
-    for (const t of this.order) {
+    for (const t of this.list) {
       const tile = this.tiles.get(t.id);
       const a = tile.anchorW;
       const y0 = tile.pivot.position.y + TILE_TOP;
-      this.p.set(a.x - FIG_SHIFT * k, y0, a.z);
-      const drawn = t.scale > 0.001;
-      const colors = t.frozen ?? { blot: t.blot, deep: t.deep };
-      const h = FIG_H[t.denom] * k;
+      this.p.set(a.x, y0, a.z);
+      const colors = t.frozen ?? { col: t.col, deep: t.deep };
+      // the size follows the displayed count (a float while it swells), capped for this territory; a stone
+      // arriving on an empty territory grows from nothing (below one army it scales, never pops)
+      const R = t.disp > 0 ? this.radiusFor(Math.max(1, t.disp), t.id) * Math.min(1, t.disp) : 0;
+      const Rn = this.radiusFor(Math.max(1, t.shown), t.id);
       t.top.copy(this.p);
       t.plaque.copy(this.p);
-      t.figTop.copy(this.p).addScaledVector(up, drawn ? h : 0.3);
-      t.halfW = this.figHalfW[t.denom] * k;
-      if (!drawn) continue;
+      t.figTop.copy(this.p);
+      t.halfW = t.shown > 0 ? Math.max(R, Rn * 0.5) : R;
       const dim = tile.dim;
-      // the blot: wider for the wider figures, a touch behind the feet; it dries with the smoke
-      const bw = Math.max(R * 0.95, t.halfW * 1.15);
-      const blotA = 0.62 * t.fade * t.scale * (1 - 0.7 * t.smoke) * (1 - 0.1 * Math.min(1, dim));
-      this.writeBlot(this.p, bw, R * 0.62, colors.blot, blotA, 0, t.seed);
-      if (t.old) this.writeFig(this.p, t.old.denom, k, t.fade, 1, 0, t.old.dry, t.lean, t.flip, 0, t.seed, colors.deep, dim, t.offX, t.offY);
-      this.writeFig(this.p, t.denom, k, t.fade * t.scale, t.reveal, Math.max(t.smoke, t.puff), 0, t.lean, t.flip, t.ink, t.seed, colors.deep, dim, t.offX, t.offY);
+      if (R > 0 && t.alpha > 0.002) this.writeStone(this.p, R, colors.col, colors.deep, t.alpha, { seed: t.seed, dry: t.dry, soak: t.soak, dim });
+      if (t.preview !== null && t.preview !== t.shown && t.preview > 0) this.writeStone(this.p, this.radiusFor(t.preview, t.id), t.col, t.deep, 1, { seed: t.seed, ghost: true, dim });
+      if (t.fig > 0.002) {
+        const hw = this.figHalfW[t.denom] * k;
+        const side = t.flip >= 0 ? -1 : 1;
+        const fp = this.p.clone();
+        fp.x += side * (Math.max(R, Rn) + hw * 0.55);
+        this.writeBlot(fp, Math.max(Rn * 0.6, hw * 1.05), Rn * 0.45, colors.deep, 0.5 * t.fig * (1 - 0.7 * t.figSmoke), t.seed);
+        if (t.figOld) this.writeFig(fp, t.figOld.denom, k, t.fig, 1, 0, t.figOld.dry, t.lean, t.flip, 0, t.seed, colors.deep, dim, t.figOffX, t.figOffY);
+        this.writeFig(fp, t.denom, k, t.fig, t.reveal, Math.max(t.figSmoke, t.puff), 0, t.lean, t.flip, 0, t.seed, colors.deep, dim, t.figOffX, t.figOffY);
+      }
     }
     for (const tr of this.movers) {
       const pts = tr.pts;
@@ -1279,41 +1233,20 @@ export class TokenSystem {
       const lt = Math.min(1, Math.max(0, (s - tr.cum[j]) / seg));
       this.p.lerpVectors(pts[j], pts[j + 1], lt);
       this.p.y = TILE_TOP;
-      // a light step: a small bob per stride and a lean into the walk
-      const ph = tr.t * tr.steps;
-      const bob = this.reduced ? 0 : Math.abs(Math.sin(ph * Math.PI)) * 0.16 * k;
-      const lean = this.reduced ? 0 : tr.flip * 0.07 * Math.sin(Math.min(1, tr.t * 4) * Math.PI * 0.5) * (1 - tr.t * 0.5);
       tr.top.copy(this.p);
       tr.plaque.copy(this.p);
-      tr.figTop.copy(this.p).addScaledVector(up, FIG_H[tr.denom] * k);
-      const fadeIn = Math.min(1, tr.t * 8) * Math.min(1, (1 - tr.t) * 12 + 0.4);
-      this.writeBlot(this.p, Math.max(R * 0.8, tr.halfW), R * 0.5, tr.blotC, 0.5 * fadeIn, 0, tr.seed);
-      this.writeFig(this.p, tr.denom, k, Math.min(1, tr.t * 8), 1, 0, 0, lean, tr.flip, 0, tr.seed, tr.deep, 0, 0, bob);
-    }
-    for (const d of this.dots) {
-      if (d.t <= 0 && d.delay > 0) continue;
-      const u = d.t;
-      if (d.kind === 'place') {
-        // falls (first 40 %: from above, growing sharper as it nears the paper), then soaks and spreads
-        const fall = Math.min(1, u / 0.4);
-        const soak = Math.max(0, (u - 0.4) / 0.6);
-        // it drops from above the figure (screen up) onto the blot
-        this.p.set(d.x, d.y, d.z).addScaledVector(this.up, d.h * (1 - ease.inQuad(fall)));
-        const r = d.r * (fall < 1 ? 0.85 + 0.15 * fall : 1 + 1.2 * ease.outCubic(soak));
-        const alpha = (fall < 1 ? 0.35 + 0.55 * fall : 0.9 * (1 - ease.inQuad(soak))) * 0.95;
-        this.writeBlot(this.p, r, r, [d.color[0] * 0.8, d.color[1] * 0.8, d.color[2] * 0.85], alpha, 1, d.x * 0.13);
-      } else {
-        const e = ease.outCubic(u);
-        this.p.set(d.x + d.vx * e * 0.5, d.y, d.z + d.vz * e * 0.5);
-        const r = d.r * (1 - 0.3 * u);
-        this.writeBlot(this.p, r, r, d.color, 0.9 * (1 - ease.inQuad(u)), 1, d.z * 0.17);
-      }
+      tr.figTop.copy(this.p);
+      tr.halfW = this.radiusFor(tr.n);
+      const fadeIn = Math.min(1, tr.t * 10);
+      this.writeStone(this.p, tr.halfW, tr.col, tr.deep, fadeIn, { seed: tr.seed });
     }
     this.blots.commit();
+    this.stones.commit();
     this.figs.commit();
   }
 
   dispose(): void {
+    this.stones.dispose();
     this.figs.dispose();
     this.blots.dispose();
     this.atlas?.dispose();

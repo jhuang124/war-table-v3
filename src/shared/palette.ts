@@ -3,14 +3,22 @@
 // `light` a tint for text and marks on the indigo paper, `ink` the legible mark color on top of `base`
 // (the ivory the figures and pips are drawn in).
 //
-// Ink overhaul (docs/INK.md A7): muted pigment washes on indigo paper. Ids stay (`crimson`… keys are
-// in saved games and the engine); names, hexes and emblems changed. Vermilion, Slate and Ochre are the
-// approved hexes; Sage, Wisteria and Plum moved in lightness only (CIELAB L; chroma and hue kept) to
-// pass the colour-blind check: Machado 2009 at full severity (protan, deutan, tritan) + CIEDE2000, on
-// the raw hexes and as a 0.92 wash over the #101a30 paper.
-//   worst pair, default four (crimson, cobalt, amber, emerald): ΔE 9.84 (protan, Ochre/Sage)
-//   worst pair, all six:                                       ΔE 9.84 (same pair); next 10.1 (tritan Vermilion/Plum)
-//   (as approved, before the lightness moves: default-four 8.28 deutan Vermilion/Sage; all six 3.39 protan Slate/Wisteria)
+// v3 physical board (_claude/v3/PLAN.md; John 2026-09-30: "palette back to the reference"). The bases are
+// sampled from the chosen reference (_claude/moodboard/chosen-silver-ink-board.png): tests/e2e/palette-sample.ts
+// takes the median wash over 4–5 territory patches per colour, and the board's own wash (≈ 0.91 of the base
+// on screen) is backed out. Then lightness only moves (CIELAB L; chroma and hue kept) to pass the colour-blind
+// check: Machado 2009 at full severity (protan, deutan, tritan) + CIEDE2000, raw and as a 0.92 wash over the
+// #101a30 paper (tests/e2e/palette-check.ts, tests/e2e/colorblind.ts). Ids stay (`crimson`… are in saves).
+//   sampled on screen → base: Vermilion #9d604f → #ac6957 · Slate #455c73 → #4c657e · Ochre #a78653 → #b7935b
+//   · Sage #5c6852 → #65725a. As sampled the four fail (ΔE 2.45, protan Vermilion/Sage: the reference's red and
+//   olive sit at one lightness); Vermilion −4 L and Sage +11 L pass. Wisteria and Plum (not in the reference)
+//   take its chroma (~0.6 of the old) and move in lightness (+7, −5) to pass beside the other four.
+//   Lead review (2026-09-30): Slate and Sage blurred at a 30 % squint, so Slate went a touch bluer and lighter
+//   (#4c657e → #4f6e96; Slate/Sage ΔE 28.6 → 31.0 in normal vision). A warmer Sage was tried and dropped: every
+//   warmer Sage fell under the bar against Ochre in protan (ΔE 6.4–8.8).
+//   worst pair, default four (crimson, cobalt, amber, emerald): ΔE 10.27
+//   worst pair, all six:                                       ΔE 9.97
+// `deep` = base × 0.66; `light` = the base 42 % of the way to the ivory ink.
 
 import type { PlayerColorId } from '../engine/types';
 import { brushMark } from './enso';
@@ -32,17 +40,17 @@ export interface PlayerPalette {
 const IVORY_INK = '#f2ede2';
 
 export const PLAYER_COLORS: Record<PlayerColorId, PlayerPalette> = {
-  crimson: { id: 'crimson', emblem: 'triangle', name: 'Vermilion', base: '#b9574a', deep: '#823128', light: '#f0aa9e', ink: IVORY_INK },
-  cobalt: { id: 'cobalt', emblem: 'circle', name: 'Slate', base: '#5b7ea3', deep: '#345473', light: '#aabdd6', ink: IVORY_INK },
-  emerald: { id: 'emerald', emblem: 'square', name: 'Sage', base: '#799a74', deep: '#516d4d', light: '#acc1a8', ink: IVORY_INK },
-  amber: { id: 'amber', emblem: 'diamond', name: 'Ochre', base: '#b8974f', deep: '#876c2e', light: '#dac194', ink: IVORY_INK },
-  violet: { id: 'violet', emblem: 'star', name: 'Wisteria', base: '#a394cc', deep: '#766999', light: '#cac0e4', ink: IVORY_INK },
-  rose: { id: 'rose', emblem: 'cross', name: 'Plum', base: '#904c6b', deep: '#5f2642', light: '#deafc2', ink: IVORY_INK },
+  crimson: { id: 'crimson', emblem: 'triangle', name: 'Vermilion', base: '#a15f4d', deep: '#6a3f33', light: '#c39b8c', ink: IVORY_INK },
+  cobalt: { id: 'cobalt', emblem: 'circle', name: 'Slate', base: '#4f6e96', deep: '#344963', light: '#93a3b6', ink: IVORY_INK },
+  emerald: { id: 'emerald', emblem: 'square', name: 'Sage', base: '#818e75', deep: '#555e4d', light: '#b0b6a3', ink: IVORY_INK },
+  amber: { id: 'amber', emblem: 'diamond', name: 'Ochre', base: '#b7935b', deep: '#79613c', light: '#d0b994', ink: IVORY_INK },
+  violet: { id: 'violet', emblem: 'star', name: 'Wisteria', base: '#9f95bb', deep: '#69627b', light: '#c2bacb', ink: IVORY_INK },
+  rose: { id: 'rose', emblem: 'cross', name: 'Plum', base: '#704156', deep: '#4a2b39', light: '#a78991', ink: IVORY_INK },
 };
 
 export const PLAYER_COLOR_IDS = Object.keys(PLAYER_COLORS) as PlayerColorId[];
 
-/** Default colors for seats 1-4 (docs/ROUND2.md §E): Vermilion, Slate, Ochre, Sage (worst pair ΔE 9.84). */
+/** Default colors for seats 1-4 (docs/ROUND2.md §E): Vermilion, Slate, Ochre, Sage (worst pair ΔE 10.27). */
 export const DEFAULT_SEAT_COLORS: PlayerColorId[] = ['crimson', 'cobalt', 'amber', 'emerald'];
 
 type Pt = [number, number];
@@ -72,3 +80,18 @@ export const EMBLEM_PATHS: Record<SeatEmblem, string> = {
 
 /** Neutral wash for unclaimed territories during a draft: bare paper-toned ivory, dimmed. */
 export const UNCLAIMED_COLOR = '#8f8a7e';
+
+/**
+ * The continents' printed tints (v3, _claude/v3/PLAN.md §2: "the real board's coloured zones, at ink
+ * restraint"), CONTINENT_IDS order: North America ochre, South America rust, Europe steel, Africa umber,
+ * Asia green, Australia plum. The board mixes them 10 % into each continent's halo of sea and prints the
+ * continent's name in them; the seat strip's held-continent ticks use them lifted toward the ivory.
+ */
+export const CONTINENT_TINTS = ['#8a7443', '#8a4f43', '#56709a', '#7d6448', '#56785c', '#76597f'];
+/** A continent tint lifted toward the ivory ink, so it reads as a mark or a word on the indigo paper. */
+export function continentInk(i: number, k = 0.38): string {
+  const h = CONTINENT_TINTS[i] ?? '#888888';
+  const c = [1, 3, 5].map((j) => parseInt(h.slice(j, j + 2), 16));
+  const iv = [242, 237, 226];
+  return `#${c.map((v, j) => Math.round(v + (iv[j] - v) * k).toString(16).padStart(2, '0')).join('')}`;
+}

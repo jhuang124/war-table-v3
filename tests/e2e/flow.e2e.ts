@@ -51,7 +51,9 @@ await clickT(page, 'siberia');
 const armed = (await ui(page)).buttons.join(' / ');
 const ocean = await page.evaluate(() => {
   const pick = (window.__board as unknown as { __debug: { pick: (x: number, y: number) => string | null } }).__debug.pick;
-  for (let y = innerHeight * 0.25; y < innerHeight * 0.6; y += 12) for (let x = innerWidth * 0.3; x < innerWidth * 0.7; x += 12) if (!pick(x, y)) return { x, y };
+  // open water with a little room round it (a stack's box moves a few px as it settles at real speed)
+  const clear = (x: number, y: number) => [-10, 0, 10].every((dx) => [-10, 0, 10].every((dy) => !pick(x + dx, y + dy)));
+  for (let y = innerHeight * 0.25; y < innerHeight * 0.6; y += 12) for (let x = innerWidth * 0.3; x < innerWidth * 0.7; x += 12) if (clear(x, y)) return { x, y };
   return null;
 });
 if (ocean) {
