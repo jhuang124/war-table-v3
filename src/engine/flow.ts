@@ -1,10 +1,11 @@
 // Internal state-machine transitions shared by setup and the reducer. Every function here
 // mutates a *draft* (a private clone) and appends events; nothing here is exported publicly.
 
+import { decayGrudges, REBUFF_ROUNDS } from './diplomacy';
 import { ADJACENCY, TERRITORY_IDS } from './mapData';
 import { random, shuffleInPlace } from './rng';
 import { reinforcementsFor, territoryCount, totalArmies, turnLimitWinner } from './rules';
-import type { GameEvent, GameState, Phase, PlayerId, TerritoryId } from './types';
+import type { GameEvent, GameState, Phase, PlayerId, TerritoryId, TruceOffer } from './types';
 
 export interface Draft {
   s: GameState;
@@ -178,7 +179,8 @@ export function finishTurn(d: Draft): void {
     }
   }
   s.conqueredThisTurn = false;
-  const next = nextSeat(s, cur, (p) => !s.players[p].eliminated);
+  lapseOffers(d, cur);
+  const next = nextSeat(s, cur, (p) => !s.players[p].eliminated && !s.players[p].neutral);
   if (!next) return; // cannot happen: the current player is alive
   if (next.wrapped) {
     if (s.config.turnLimit !== null && s.round >= s.config.turnLimit) {
@@ -186,7 +188,34 @@ export function finishTurn(d: Draft): void {
       return;
     }
     s.round += 1;
+    newRoundDiplomacy(d);
     recordTimeline(d);
   }
   startTurn(d, next.player);
+}
+
+/** Offers to `cur` that were made before this turn lapse as `cur`'s turn ends. */
+function lapseOffers(d: Draft, cur: PlayerId): void {
+  const dip = d.s.diplomacy;
+  if (!dip || dip.offers.length === 0) return;
+  const keep: TruceOffer[] = [];
+  for (const o of dip.offers) {
+    if (o.to === cur && o.turn < d.s.turn) {
+      dip.rebuffs.push({ from: o.from, to: o.to, round: d.s.round });
+      emit(d, { type: 'truceDeclined', from: o.from, to: o.to, rounds: o.rounds, kind: o.kind, reason: 'lapsed' });
+    } else keep.push(o);
+  }
+  dip.offers = keep;
+}
+
+/** Grudges fade; truces whose time is up end; old refusals are forgotten. */
+function newRoundDiplomacy(d: Draft): void {
+  const s = d.s;
+  decayGrudges(s);
+  const dip = s.diplomacy;
+  if (!dip) return;
+  const ending = dip.truces.filter((t) => t.until <= s.round);
+  if (ending.length) dip.truces = dip.truces.filter((t) => t.until > s.round);
+  for (const t of ending) emit(d, { type: 'truceExpired', from: t.from, to: t.to, reason: 'time' });
+  dip.rebuffs = dip.rebuffs.filter((r) => s.round - r.round < REBUFF_ROUNDS);
 }

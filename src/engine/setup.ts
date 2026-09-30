@@ -1,5 +1,6 @@
 // Game creation: config defaults/sanitizing, seat setup, deck, first player, deal or draft.
 
+import { isPersonality } from './ai/personality';
 import { buildDeck } from './cards';
 import { afterTerritoriesAssigned, emit, setPhase, updatePeak, type Draft } from './flow';
 import { STARTING_ARMIES, TERRITORY_IDS } from './mapData';
@@ -17,6 +18,13 @@ import {
 } from './types';
 
 const COLORS = ['crimson', 'cobalt', 'emerald', 'amber', 'violet', 'rose'] as const;
+
+/**
+ * The 2-player neutral seat (config.neutral): a third of the board, dealt at random before anything
+ * else, with `armiesEach` armies on every territory. Tuned with `npm run sim` so the first mover's
+ * 2-player win rate sits near 50–60 % instead of ~76 %.
+ */
+export const NEUTRAL_SETUP = { territories: 14, armiesEach: 3, name: 'Neutral' };
 
 /** Sensible defaults: random deal, auto placement, progressive cards, connected fortify, world domination. */
 export function defaultConfig(players: PlayerConfig[]): GameConfig {
@@ -64,6 +72,7 @@ export function sanitizeConfig(config: GameConfig): GameConfig {
     color: p.color,
     kind: p.kind,
     ...(p.kind === 'ai' ? { difficulty: p.difficulty ?? 'normal' } : p.difficulty ? { difficulty: p.difficulty } : {}),
+    ...(isPersonality(p.personality) ? { personality: p.personality } : {}),
   })) as PlayerConfig[];
   const out: GameConfig = {
     players,
@@ -78,6 +87,9 @@ export function sanitizeConfig(config: GameConfig): GameConfig {
     seed: toSeed(int(config.seed, 0)),
   };
   if (config.startingArmies !== undefined) out.startingArmies = Math.max(minArmies, int(config.startingArmies, minArmies));
+  // Additive flags: only written when on, so a classic config sanitizes to exactly what it did before.
+  if (config.diplomacy === true) out.diplomacy = true;
+  if (config.neutral === true && n === 2) out.neutral = true;
   return out;
 }
 
@@ -100,6 +112,9 @@ export function emptyStats(): PlayerStats {
  *   random: territoriesDealt → (auto) armiesPlaced×N(setup) → turnStarted → phaseChanged(reinforce)
  *                            → (manual) phaseChanged(setup-place) → setupTurn
  *   draft:  phaseChanged(setup-claim)
+ * With config.neutral (2 players): the neutral seat is appended (id 2) and dealt its third first;
+ *   random: its territories are in territoriesDealt, then armiesPlaced(setup) for its extra armies;
+ *   draft:  territoryClaimed ×14 (neutral) → armiesPlaced(setup) ×14 → phaseChanged(setup-claim).
  */
 export function createGame(inputConfig: GameConfig): { state: GameState; events: GameEvent[] } {
   const problem = validateConfig(inputConfig);
@@ -121,6 +136,7 @@ export function createGame(inputConfig: GameConfig): { state: GameState; events:
       color: p.color,
       kind: p.kind,
       ...(p.kind === 'ai' ? { difficulty: p.difficulty ?? 'normal' } : {}),
+      ...(p.personality ? { personality: p.personality } : {}),
       cards: [],
       eliminated: false,
       setupArmies: starting,
@@ -150,8 +166,31 @@ export function createGame(inputConfig: GameConfig): { state: GameState; events:
   s.currentPlayer = s.firstPlayer;
   emit(d, { type: 'gameStarted', firstPlayer: s.firstPlayer });
 
+  // 2-player neutral seat: appended after the real seats (id n), never in turn order.
+  let open: TerritoryId[] = [...TERRITORY_IDS];
+  const neutralId = config.neutral ? n : -1;
+  if (config.neutral) {
+    const used = new Set(config.players.map((p) => p.color));
+    s.players.push({
+      id: neutralId,
+      name: NEUTRAL_SETUP.name,
+      color: COLORS.find((c) => !used.has(c)) ?? 'violet',
+      kind: 'ai',
+      neutral: true,
+      cards: [],
+      eliminated: false,
+      setupArmies: 0,
+      stats: emptyStats(),
+    });
+    const pick = shuffleInPlace(s, [...TERRITORY_IDS]).slice(0, NEUTRAL_SETUP.territories);
+    const taken = new Set(pick);
+    for (const t of pick) s.territories[t] = { owner: neutralId, armies: NEUTRAL_SETUP.armiesEach };
+    open = TERRITORY_IDS.filter((t) => !taken.has(t));
+    updatePeak(d, neutralId);
+  }
+
   if (config.setupMode === 'random') {
-    const order = shuffleInPlace(s, [...TERRITORY_IDS]);
+    const order = shuffleInPlace(s, open);
     const owners = {} as Record<TerritoryId, PlayerId>;
     order.forEach((t, i) => {
       const pid = (s.firstPlayer + i) % n;
@@ -161,10 +200,26 @@ export function createGame(inputConfig: GameConfig): { state: GameState; events:
     for (const t of TERRITORY_IDS) owners[t] = s.territories[t].owner;
     for (const p of s.players) p.setupArmies = Math.max(0, p.setupArmies);
     emit(d, { type: 'territoriesDealt', owners });
+    if (config.neutral) neutralArmiesEvents(d, neutralId);
     for (const p of s.players) updatePeak(d, p.id);
     afterTerritoriesAssigned(d);
   } else {
+    if (config.neutral) {
+      for (const t of TERRITORY_IDS) {
+        if (s.territories[t].owner === neutralId) emit(d, { type: 'territoryClaimed', player: neutralId, territory: t });
+      }
+      neutralArmiesEvents(d, neutralId);
+    }
     setPhase(d, { kind: 'setup-claim' });
   }
   return { state: s, events: d.ev };
+}
+
+/** The neutral seat's armies beyond the first, as setup placements (so the display counts them in). */
+function neutralArmiesEvents(d: Draft, neutralId: PlayerId): void {
+  if (NEUTRAL_SETUP.armiesEach <= 1) return;
+  for (const t of TERRITORY_IDS) {
+    if (d.s.territories[t].owner !== neutralId) continue;
+    emit(d, { type: 'armiesPlaced', player: neutralId, territory: t, count: NEUTRAL_SETUP.armiesEach - 1, source: 'setup' });
+  }
 }

@@ -2,9 +2,22 @@
 // presets with honest time estimates, the summary line, and the problems that block Start.
 
 import { PLAYER_COLORS, PLAYER_COLOR_IDS, DEFAULT_SEAT_COLORS } from '../shared/palette';
-import { STARTING_ARMIES, type GameConfig, type PlayerColorId } from '../engine';
+import { isPersonality, STARTING_ARMIES, type AiPersonality, type GameConfig, type PlayerColorId } from '../engine';
 import { SEP } from './copy';
 import type { HouseRulesDraft, LengthPreset, NewGameVM, SeatDraft, SetupPreset } from './viewModel';
+
+/**
+ * Fields the New game screen may add later (viewModel.ts owns the draft types). presets.ts already
+ * reads them when present, so wiring the UI is one field each: a seat's AI personality and the
+ * 2-player neutral seat house rule.
+ */
+type SeatDraftAi = SeatDraft & { personality?: AiPersonality };
+type HouseDraftExtras = HouseRulesDraft & { neutral?: boolean };
+
+/** The neutral seat applies only to exactly 2 seats (engine ignores it otherwise). */
+export function usesNeutral(d: NewGameDraft): boolean {
+  return d.seats.length === 2 && (d.house as HouseDraftExtras).neutral === true;
+}
 
 export interface NewGameDraft {
   seats: SeatDraft[];
@@ -59,9 +72,17 @@ export function sanitizeDraft(x: unknown): NewGameDraft {
   };
 }
 
-/** Win rules per length preset. 2 players are dealt 50% each, so their thresholds sit higher (lead notes). */
-export function lengthRules(length: LengthPreset, players: number): { dominationPercent: number; turnLimit: number | null } {
-  const two = players === 2;
+/**
+ * Win rules per length preset. 2 players are dealt 50% each, so their thresholds sit higher (lead notes).
+ * With the neutral seat each player starts on a third of the board, as in a 3-player game, so 2 players
+ * use the 3-player thresholds.
+ */
+export function lengthRules(
+  length: LengthPreset,
+  players: number,
+  neutral = false,
+): { dominationPercent: number; turnLimit: number | null } {
+  const two = players === 2 && !neutral;
   switch (length) {
     case 'quick':
       return { dominationPercent: two ? 75 : 60, turnLimit: 12 };
@@ -83,14 +104,17 @@ export function territoriesToWin(percent: number): number {
 
 export function draftToConfig(d: NewGameDraft, seed: number): GameConfig {
   const n = d.seats.length;
-  const { dominationPercent, turnLimit } = lengthRules(d.length, n);
-  const players = d.seats.map((s, i) => ({
+  const neutral = usesNeutral(d);
+  const { dominationPercent, turnLimit } = lengthRules(d.length, n, neutral);
+  const players = (d.seats as SeatDraftAi[]).map((s) => ({
     name: s.name.trim() || PLAYER_COLORS[s.color].name,
     color: s.color,
     kind: s.kind,
     ...(s.kind === 'ai' ? { difficulty: s.difficulty } : {}),
+    ...(s.kind === 'ai' && isPersonality(s.personality) ? { personality: s.personality } : {}),
   }));
   return {
+    ...(neutral ? { neutral: true } : {}),
     players,
     setupMode: d.house.draft ? 'draft' : 'random',
     initialPlacement: d.setup === 'placeOwn' ? 'manual' : 'auto',
@@ -104,13 +128,15 @@ export function draftToConfig(d: NewGameDraft, seed: number): GameConfig {
 }
 
 // Rounds until someone first holds X% of the board: [median, p90] for normal AIs, from
-// `npm run sim -- 200` (SPEC §11.1; 100 games per player count, 2026-09-27). Re-run and paste if the AI
-// or the rules change.
+// `npm run sim -- 200` (SPEC §11.1; 100 games per player count, 2026-09-27; re-checked 2026-09-30,
+// unchanged). Re-run and paste if the AI or the rules change.
 const ROUNDS: Record<number, Record<number, [number, number]>> = {
   2: { 60: [1, 3], 70: [4, 7], 75: [4, 8], 80: [5, 9], 100: [8, 11] },
   3: { 60: [6, 11], 70: [8, 15], 75: [9, 18], 80: [10, 18], 100: [13, 22] },
   4: { 60: [8, 14], 70: [11, 19], 75: [12, 21], 80: [13, 26], 100: [15, 31] },
 };
+/** 2 players plus the neutral seat (`2p+neutral` line of `npm run sim`, 100 games, 2026-09-30). */
+const ROUNDS_2P_NEUTRAL: Record<number, [number, number]> = { 60: [5, 8], 70: [7, 12], 75: [7, 13], 80: [8, 13], 100: [12, 18] };
 /** Humans attack less eagerly than the sim's AIs, so real games run a few more rounds. */
 const HUMAN_ROUND_FACTOR = 1.3;
 /** Seconds per human turn: UX.md §4.3 puts early turns at 60–90 s; later turns carry more fights. */
@@ -132,10 +158,12 @@ function fmtRange(loMin: number, hiMin: number): string {
   return a === b ? `~${fmt(a)} h` : `~${fmt(a)}–${fmt(b)} h`;
 }
 
-export function lengthEstimate(length: LengthPreset, seats: SeatDraft[]): string {
+export function lengthEstimate(length: LengthPreset, seats: SeatDraft[], neutral = false): string {
   const n = Math.min(4, Math.max(2, seats.length));
-  const { dominationPercent, turnLimit } = lengthRules(length, n);
-  const row = ROUNDS[n][dominationPercent] ?? ROUNDS[n][70];
+  const withNeutral = neutral && n === 2;
+  const { dominationPercent, turnLimit } = lengthRules(length, n, withNeutral);
+  const table = withNeutral ? ROUNDS_2P_NEUTRAL : ROUNDS[n];
+  const row = table[dominationPercent] ?? table[70];
   const humans = seats.filter((s) => s.kind === 'human').length;
   const perRound = humans * HUMAN_TURN_S + (n - humans) * AI_TURN_S;
   const cap = (r: number) => (turnLimit ? Math.min(turnLimit, r) : r);
@@ -164,7 +192,7 @@ export function draftProblems(d: NewGameDraft): string[] {
 
 export function draftSummary(d: NewGameDraft): string {
   const n = d.seats.length;
-  const { dominationPercent, turnLimit } = lengthRules(d.length, n);
+  const { dominationPercent, turnLimit } = lengthRules(d.length, n, usesNeutral(d));
   const deal = d.house.draft ? 'Territories claimed in turn' : 'Territories dealt at random';
   const place = d.setup === 'quickDeal' ? 'armies placed for you' : 'you place your own armies';
   const need = territoriesToWin(dominationPercent);
@@ -179,8 +207,9 @@ export function draftSummary(d: NewGameDraft): string {
 
 export function buildNewGameVM(d: NewGameDraft): NewGameVM {
   const n = d.seats.length;
-  const q = lengthRules('quick', n);
-  const e = lengthRules('evening', n);
+  const neutral = usesNeutral(d);
+  const q = lengthRules('quick', n, neutral);
+  const e = lengthRules('evening', n, neutral);
   const problems = draftProblems(d);
   return {
     seats: d.seats,
@@ -188,9 +217,9 @@ export function buildNewGameVM(d: NewGameDraft): NewGameVM {
     setup: d.setup,
     house: d.house,
     lengthOptions: [
-      { id: 'quick', label: 'Quick', detail: `${q.dominationPercent}% or ${q.turnLimit} rounds`, estimate: lengthEstimate('quick', d.seats) },
-      { id: 'evening', label: 'Evening', detail: `${e.dominationPercent}% of the world`, estimate: lengthEstimate('evening', d.seats) },
-      { id: 'full', label: 'Full conquest', detail: 'every territory', estimate: lengthEstimate('full', d.seats) },
+      { id: 'quick', label: 'Quick', detail: `${q.dominationPercent}% or ${q.turnLimit} rounds`, estimate: lengthEstimate('quick', d.seats, neutral) },
+      { id: 'evening', label: 'Evening', detail: `${e.dominationPercent}% of the world`, estimate: lengthEstimate('evening', d.seats, neutral) },
+      { id: 'full', label: 'Full conquest', detail: 'every territory', estimate: lengthEstimate('full', d.seats, neutral) },
     ],
     setupOptions: [
       { id: 'quickDeal', label: 'Quick deal', detail: 'armies placed for you' },

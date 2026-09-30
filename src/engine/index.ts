@@ -4,7 +4,7 @@ export * from './types';
 export * from './mapData';
 
 export { createGame, defaultConfig, validateConfig, sanitizeConfig } from './setup';
-export { applyAction, validateAction, cloneState } from './reducer';
+export { applyAction, validateAction, cloneState, truceTargets, truceOffersTo } from './reducer';
 export { legalActionsSummary, type LegalSummary, type TradeOption } from './summary';
 export {
   reinforcementsFor,
@@ -53,3 +53,25 @@ export {
 } from './probability';
 export { chooseAiAction, fallbackAction, PERSONAS, type Persona } from './ai';
 export { nextRandom } from './rng';
+export {
+  PERSONALITIES,
+  PERSONALITY_IDS,
+  TEMPERAMENTS,
+  isPersonality,
+  personaFor,
+  type PersonalityInfo,
+  type Temperament,
+} from './ai/personality';
+export { acceptsTruce, chooseTruceProposal, truceScore } from './ai/diplomacy';
+export {
+  truceSentence,
+  truceBetween,
+  trucePartners,
+  offerBetween,
+  grudgeOf,
+  grudgesOf,
+  GRUDGE_DECAY,
+  TRUCE_MIN_ROUNDS,
+  TRUCE_MAX_ROUNDS,
+} from './diplomacy';
+export { NEUTRAL_SETUP } from './setup';

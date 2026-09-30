@@ -2,6 +2,10 @@
 //
 // Every game must end in gameOver, with every AI action legal on the first try (no fallback),
 // under 500 rounds, with the invariants below holding after every action.
+//
+// After the classic sections: personalities (4p pair tables and a free-for-all), diplomacy counts,
+// the 2-player first-mover rate with and without the neutral seat (plus its rounds table for
+// presets.ts), and AI decision time per turn.
 
 import { performance } from 'node:perf_hooks';
 import {
@@ -12,7 +16,9 @@ import {
   UNCLAIMED,
   validateAction,
   type AiDifficulty,
+  type AiPersonality,
   type GameConfig,
+  type GameEventType,
   type GameState,
   type PlayerConfig,
 } from '../src/engine';
@@ -32,7 +38,35 @@ interface GameResult {
   players: PlayerConfig[];
   /** Round in which some player first held ≥ 60 / 70 / 100 % of the board. */
   reach: Record<number, number>;
+  firstPlayer: number;
+  /** Diplomacy event counts. */
+  dip: Partial<Record<GameEventType, number>>;
+  /** Per seat: main turns, conquests, eliminations made, truces broken, turns started holding a continent. */
+  seatStats: SeatStats[];
 }
+
+interface SeatStats {
+  turns: number;
+  conq: number;
+  elim: number;
+  breaks: number;
+  contTurns: number;
+  fights: number;
+  /** Fights started with under 1.6× the defender's armies / with 3× or more. */
+  even: number;
+  lopsided: number;
+  /** Armies lost while attacking. */
+  spent: number;
+}
+/** Per-seat play style is measured over the opening, while every seat is still in. */
+const OPENING_ROUNDS = 6;
+const emptySeat = (): SeatStats => ({ turns: 0, conq: 0, elim: 0, breaks: 0, contTurns: 0, fights: 0, even: 0, lopsided: 0, spent: 0 });
+
+/** Decision time summed over each main turn (ms), bucketed by label. */
+const turnTimes: Record<string, number[]> = {};
+/** Fights (attack/blitz actions) per main turn, same buckets: the on-screen length of an AI turn. */
+const fightsPerTurn: Record<string, number[]> = {};
+let turnBucket = 'soak';
 
 /** Win thresholds the New game presets use (3–4p: 60 / 70 / 100; 2p: 75 / 80 / 100). */
 const THRESHOLDS = [60, 70, 75, 80, 100];
@@ -72,9 +106,16 @@ function playGame(config: GameConfig, label: string): GameResult {
     if (state.round === 0) return;
     const counts = new Array<number>(state.players.length).fill(0);
     for (const t of TERRITORY_IDS) counts[state.territories[t].owner]++;
-    const top = Math.max(...counts);
+    const top = Math.max(...counts.filter((_, i) => !state.players[i].neutral));
     for (const pct of THRESHOLDS) if (reach[pct] === undefined && top >= Math.ceil((42 * pct) / 100)) reach[pct] = state.round;
   };
+  const dip: Partial<Record<GameEventType, number>> = {};
+  const seatStats = state.players.map(emptySeat);
+  let turnAcc = 0;
+  let turnNo = state.turn;
+  const bucket = (turnTimes[turnBucket] ??= []);
+  const fBucket = (fightsPerTurn[turnBucket] ??= []);
+  let turnFights = 0;
   while (state.phase.kind !== 'game-over') {
     if (++actions > MAX_ACTIONS) throw new Error(`${label}: stuck (${MAX_ACTIONS} actions, round ${state.round})`);
     if (state.round > MAX_ROUNDS) throw new Error(`${label}: exceeded ${MAX_ROUNDS} rounds`);
@@ -84,16 +125,47 @@ function playGame(config: GameConfig, label: string): GameResult {
     if (rawErr) throw new Error(`${label}: AI chose illegal ${JSON.stringify(raw)} in ${state.phase.kind}: ${rawErr}`);
     const t0 = performance.now();
     const action = chooseAiAction(state, me);
-    decisionTimes.push(performance.now() - t0);
+    const dt = performance.now() - t0;
+    decisionTimes.push(dt);
+    turnAcc += dt;
     if (action.type === 'reinforce') {
       shape.reinforceActions++;
       shape.reinforceArmies += action.count ?? 1;
     } else if (action.type === 'attack') shape.attack++;
     else if (action.type === 'blitz') shape.blitz++;
+    if ((action.type === 'blitz' || action.type === 'attack') && state.round <= OPENING_ROUNDS) {
+      const st = seatStats[me];
+      st.fights++;
+      const ratio = state.territories[action.from].armies / Math.max(1, state.territories[action.to].armies);
+      if (ratio < 1.6) st.even++;
+      else if (ratio >= 3) st.lopsided++;
+    }
     const res = applyAction(state, action);
     if (!res.ok) throw new Error(`${label}: applyAction rejected ${JSON.stringify(action)}: ${res.error}`);
     if (res.events.length === 0) throw new Error(`${label}: action produced no events ${JSON.stringify(action)}`);
     state = res.state;
+    const opening = state.round >= 1 && state.round <= OPENING_ROUNDS;
+    for (const e of res.events) {
+      if (e.type.startsWith('truce')) dip[e.type] = (dip[e.type] ?? 0) + 1;
+      if (e.type === 'playerEliminated') seatStats[e.by].elim++;
+      else if (e.type === 'truceBroken') seatStats[e.by].breaks++;
+      if (!opening) continue;
+      if (e.type === 'turnStarted') {
+        seatStats[e.player].turns++;
+        if (e.reinforcements.continents.length) seatStats[e.player].contTurns++;
+      } else if (e.type === 'territoryConquered') seatStats[e.player].conq++;
+      else if (e.type === 'diceRolled') seatStats[e.player].spent += e.attackerLosses;
+    }
+    if (action.type === 'blitz' || action.type === 'attack') turnFights++;
+    if (state.turn !== turnNo) {
+      if (turnNo > 0) {
+        bucket.push(turnAcc);
+        fBucket.push(turnFights);
+      }
+      turnFights = 0;
+      turnAcc = 0;
+      turnNo = state.turn;
+    }
     check(state, label);
     track();
   }
@@ -105,6 +177,9 @@ function playGame(config: GameConfig, label: string): GameResult {
     actions,
     players: config.players,
     reach,
+    firstPlayer: state.firstPlayer,
+    dip,
+    seatStats,
   };
 }
 
@@ -198,7 +273,9 @@ h2h('hard', 'easy');
 h2h('hard', 'normal');
 h2h('normal', 'easy');
 
+turnBucket = 'classic 4p';
 const four = run('4p-normal', M, (i) => makeConfig(i, seats(['normal', 'normal', 'normal', 'normal']), { turnLimit: null, dominationPercent: 100 }));
+turnBucket = 'soak';
 const r4 = four.map((g) => g.rounds);
 console.log(
   `  4p normal×4 (domination): avg rounds ${(r4.reduce((a, b) => a + b, 0) / Math.max(1, r4.length)).toFixed(1)}, median ${median(r4)}, range ${Math.min(...r4)}–${Math.max(...r4)}, in 15–60: ${r4.filter((r) => r >= 15 && r <= 60).length}/${r4.length}`,
@@ -237,12 +314,122 @@ console.log(
 );
 if (shape.attack > shape.blitz * 0.05) failures.push(`AI rolled single attacks ${shape.attack} times vs ${shape.blitz} blitzes (SPEC §11.4 wants blitz)`);
 
+// --- Personalities ------------------------------------------------------------------------------
+// Normal difficulty throughout, full-conquest games. "default" = the classic AI (no personality).
+type Kind = AiPersonality | 'default';
+const KINDS: Kind[] = ['turtle', 'opportunist', 'warlord', 'default'];
+function pSeats(kinds: Kind[]): PlayerConfig[] {
+  return kinds.map((k, i) => ({
+    name: `${k[0].toUpperCase()}${k.slice(1)} ${i + 1}`,
+    color: COLORS[i],
+    kind: 'ai',
+    difficulty: 'normal',
+    ...(k === 'default' ? {} : { personality: k }),
+  }));
+}
+const kindOf = (p: PlayerConfig): Kind => p.personality ?? 'default';
+const P = N;
+const full = { turnLimit: null, dominationPercent: 100 } as const;
+const allDip: Partial<Record<GameEventType, number>> = {};
+let dipGames = 0;
+const addDip = (gs: GameResult[]) => {
+  for (const g of gs) {
+    dipGames++;
+    for (const [k, v] of Object.entries(g.dip)) allDip[k as GameEventType] = (allDip[k as GameEventType] ?? 0) + (v ?? 0);
+  }
+};
+
+console.log(`\n=== Personalities: 4p pairs, two seats each (X Y X Y, flipped every other game), ${P} games per pair; X's win share (fair 50%) ===`);
+turnBucket = 'persona 4p';
+for (let a = 0; a < KINDS.length; a++) {
+  for (let b = a + 1; b < KINDS.length; b++) {
+    const X = KINDS[a];
+    const Y = KINDS[b];
+    const res = run(`${X}-v-${Y}`, P, (i) => makeConfig(i, pSeats(i % 2 === 0 ? [X, Y, X, Y] : [Y, X, Y, X]), full));
+    if (X !== 'default' || Y !== 'default') addDip(res);
+    const xw = res.filter((g) => kindOf(g.players[g.winner]) === X).length;
+    const rounds = res.reduce((s2, g) => s2 + g.rounds, 0) / Math.max(1, res.length);
+    console.log(`  ${X.padEnd(11)} vs ${Y.padEnd(11)} ${X} wins ${String(xw).padStart(3)}/${res.length} (${pct(xw, res.length).padStart(6)}), avg rounds ${rounds.toFixed(1)}`);
+  }
+}
+
+console.log(`\n=== Personalities: 4p free-for-all (turtle, opportunist, warlord, default; seats rotated), ${P} games; fair share 25% ===`);
+const ffa = run('ffa', P, (i) => {
+  const order = KINDS.map((_, k) => KINDS[(k + i) % 4]);
+  return makeConfig(i, pSeats(order), full);
+});
+addDip(ffa);
+for (const k of KINDS) {
+  const w = ffa.filter((g) => kindOf(g.players[g.winner]) === k).length;
+  console.log(`  ${k.padEnd(11)} wins ${String(w).padStart(3)}/${ffa.length} (${pct(w, ffa.length)})`);
+}
+console.log(
+  `  avg rounds ${(ffa.reduce((a, g) => a + g.rounds, 0) / Math.max(1, ffa.length)).toFixed(1)} (4p normal×4 classic above: ${(r4.reduce((a, b) => a + b, 0) / Math.max(1, r4.length)).toFixed(1)})`,
+);
+
+console.log(`\n=== How each plays (free-for-all above, per seat; rounds 1–${OPENING_ROUNDS} except eliminations and breaks, which are whole-game) ===`);
+for (const k of KINDS) {
+  const agg = emptySeat();
+  let seatsN = 0;
+  for (const g of ffa) {
+    g.players.forEach((p, i) => {
+      if (kindOf(p) !== k) return;
+      seatsN++;
+      for (const key of Object.keys(agg) as (keyof typeof agg)[]) agg[key] += g.seatStats[i][key];
+    });
+  }
+  const per = (x: number) => (x / Math.max(1, agg.turns)).toFixed(2);
+  console.log(
+    `  ${k.padEnd(11)} fights/turn ${per(agg.fights)}  armies spent/turn ${per(agg.spent)}  even fights ${pct(agg.even, agg.fights).padStart(6)}  lopsided ${pct(agg.lopsided, agg.fights).padStart(6)}  turns holding a continent ${pct(agg.contTurns, agg.turns).padStart(6)}  eliminations/game ${(agg.elim / Math.max(1, seatsN)).toFixed(2)}  truces broken/game ${(agg.breaks / Math.max(1, seatsN)).toFixed(2)}`,
+  );
+}
+
+const perGame = (k: GameEventType) => ((allDip[k] ?? 0) / Math.max(1, dipGames)).toFixed(2);
+console.log(`\n=== Diplomacy, per game with personalities (${dipGames} games) ===`);
+console.log(
+  `  proposed ${perGame('truceProposed')}  accepted ${perGame('truceAccepted')}  declined ${perGame('truceDeclined')}  broken ${perGame('truceBroken')}  expired ${perGame('truceExpired')}`,
+);
+if ((allDip.truceProposed ?? 0) === 0) failures.push('no truce was ever proposed in personality games');
+
+// --- 2 players: first-mover win rate, with and without the neutral seat ---------------------------
+turnBucket = '2p classic';
+const F = N;
+console.log(`\n=== 2p first mover (normal vs normal, ${F} games each, all rule variants) ===`);
+function firstMover(label: string, neutral: boolean): GameResult[] {
+  const res = run(label, F, (i) => makeConfig(i, seats(['normal', 'normal']), neutral ? { neutral: true } : {}));
+  const fw = res.filter((g) => g.winner === g.firstPlayer).length;
+  const rounds = res.reduce((a, g) => a + g.rounds, 0) / Math.max(1, res.length);
+  console.log(`  ${neutral ? 'neutral seat' : 'no neutral  '}: first mover wins ${fw}/${res.length} (${pct(fw, res.length)}), avg rounds ${rounds.toFixed(1)}, median ${median(res.map((g) => g.rounds))}`);
+  return res;
+}
+firstMover('2p-first', false);
+turnBucket = '2p neutral';
+firstMover('2p-first-neutral', true);
+const len2n = run('len-2p-neutral', L, (i) =>
+  makeConfig(i, seats(['normal', 'normal']), { turnLimit: null, dominationPercent: 100, setupMode: 'random', neutral: true }),
+);
+const cells2n = THRESHOLDS.map((pc) => {
+  const xs = len2n.map((g) => g.reach[pc]).filter((x): x is number => x !== undefined).sort((a, b) => a - b);
+  const mean = xs.reduce((a, b) => a + b, 0) / Math.max(1, xs.length);
+  return `${pc}%: ${mean.toFixed(1)} / ${median(xs)} / ${xs[Math.floor(xs.length * 0.9)] ?? '—'}`;
+});
+console.log(`  2p+neutral rounds until X% (mean / median / p90, ${L} games): ${cells2n.join('   ')}`);
+
 // --- Timing ---------------------------------------------------------------------------------------
 const sorted = [...decisionTimes].sort((a, b) => a - b);
 const q = (f: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * f))] ?? 0;
 console.log(
   `\n=== AI decision time over ${sorted.length} decisions: mean ${(sorted.reduce((a, b) => a + b, 0) / Math.max(1, sorted.length)).toFixed(3)} ms, p99 ${q(0.99).toFixed(3)} ms, max ${q(1).toFixed(2)} ms ===`,
 );
+for (const [k, fs] of Object.entries(fightsPerTurn)) {
+  const tot = fs.reduce((a, b) => a + b, 0);
+  console.log(`  fights per main turn, ${k.padEnd(11)} AIs: mean ${(tot / Math.max(1, fs.length)).toFixed(2)} (each fight is one dice beat on screen)`);
+}
+for (const [k, xs] of Object.entries(turnTimes)) {
+  const ts = [...xs].sort((a, b) => a - b);
+  const tq = (f: number) => ts[Math.min(ts.length - 1, Math.floor(ts.length * f))] ?? 0;
+  console.log(`  per turn, ${k.padEnd(11)} AIs: p50 ${tq(0.5).toFixed(3)} ms, p95 ${tq(0.95).toFixed(3)} ms over ${ts.length} turns`);
+}
 console.log(`total ${((performance.now() - t0) / 1000).toFixed(1)} s`);
 
 if (q(0.99) > 5) failures.push(`AI p99 decision time ${q(0.99).toFixed(2)} ms exceeds 5 ms`);

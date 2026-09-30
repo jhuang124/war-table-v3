@@ -184,8 +184,9 @@ export function territoriesNeeded(state: GameState): number {
   return Math.ceil((TERRITORY_COUNT * state.config.dominationPercent) / 100);
 }
 
+/** Seats still in the game. The 2-player neutral seat never counts (it can't win or keep a game going). */
 export function alivePlayers(state: GameState): PlayerId[] {
-  return state.players.filter((p) => !p.eliminated).map((p) => p.id);
+  return state.players.filter((p) => !p.eliminated && !p.neutral).map((p) => p.id);
 }
 
 /**

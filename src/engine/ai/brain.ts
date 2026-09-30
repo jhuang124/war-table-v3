@@ -1,14 +1,21 @@
 // Heuristic AI. Stateless: every call re-reads the board and returns ONE action for `me`.
 // Randomness comes from a local generator seeded by hashing the state, so the AI never touches
 // state.rng and the same state always yields the same decision.
+//
+// Personalities (turtle / opportunist / warlord) bend the Persona and add a Temperament: grudges steer
+// targets, truce partners are left alone (unless the attack clears the personality's break bar), and a
+// partner's border stacks count as a smaller threat. Every such branch is gated on `c.pk`, which is
+// undefined for a seat without a personality, so the classic AI plays exactly as it always has.
 
 import { bonusTerritoryFor, setValueFor, validSets } from '../cards';
 import { ADJACENCY, CONTINENTS, CONTINENT_IDS, TERRITORIES, TERRITORY_IDS } from '../mapData';
 import { blitzOdds, winProbability, winProbabilityStopAt } from '../probability';
 import { hashInts, random, type RngHolder } from '../rng';
 import { fortifyPath, fortifyTargets, reinforcementsFor } from '../rules';
-import { UNCLAIMED, type Action, type ContinentId, type GameState, type Phase, type PlayerId, type TerritoryId } from '../types';
-import { PERSONAS, type Persona } from './persona';
+import { UNCLAIMED, type Action, type ContinentId, type GameState, type Phase, type PlayerId, type TerritoryId, type TerritoryState } from '../types';
+import { chooseTruceProposal } from './diplomacy';
+import type { Persona } from './persona';
+import { personaFor, TEMPERAMENTS, type Temperament } from './personality';
 
 /** Territories in each continent that border another continent (static). */
 const CONTINENT_BORDERS: Record<ContinentId, TerritoryId[]> = Object.fromEntries(
@@ -47,6 +54,16 @@ interface Ctx {
   goal: ContinentId;
   /** Opponent we're trying to eliminate this turn (hunt), or -1. */
   prey: PlayerId;
+  /** Personality knobs; undefined = the classic AI (every personality branch is skipped). */
+  pk?: Temperament;
+  /** Personality only: seats we have a truce with, or a pending offer with (not to be attacked lightly). */
+  guard: Set<PlayerId>;
+  /** Personality only: seats with a pending offer (never attacked: that would withdraw it). */
+  pending: Set<PlayerId>;
+  /** Personality only: our grudge against each seat, capped at 4. */
+  grudge: number[];
+  /** Personality only: biggest opponent army total (for the opportunist's weak-target pull). */
+  maxOppArmies: number;
 }
 
 function mkRng(s: GameState, me: PlayerId): RngHolder {
@@ -55,9 +72,12 @@ function mkRng(s: GameState, me: PlayerId): RngHolder {
   return { rng: hashInts(s.rng, s.turn, me, PHASE_ORD[ph.kind], extra, s.round) };
 }
 
+const NO_SEATS: Set<PlayerId> = new Set();
+
 function buildCtx(s: GameState, me: PlayerId): Ctx {
   const diff = s.players[me].difficulty ?? 'normal';
-  const p = PERSONAS[diff];
+  const personality = s.players[me].personality;
+  const p = personaFor(diff, personality);
   const n = s.players.length;
   const terr = new Array<number>(n).fill(0);
   const armies = new Array<number>(n).fill(0);
@@ -72,7 +92,7 @@ function buildCtx(s: GameState, me: PlayerId): Ctx {
   let leader = -1;
   let best = -1;
   for (const pl of s.players) {
-    if (pl.id === me || pl.eliminated) continue;
+    if (pl.id === me || pl.eliminated || pl.neutral) continue;
     const score = income[pl.id] * 3 + armies[pl.id] + terr[pl.id];
     if (score > best) {
       best = score;
@@ -110,9 +130,57 @@ function buildCtx(s: GameState, me: PlayerId): Ctx {
       goal = c;
     }
   }
-  const c: Ctx = { s, me, p, rng: mkRng(s, me), round: s.round, terr, armies, income, leader, mineIn, owner, desire, goal, prey: -1 };
+  const c: Ctx = {
+    s,
+    me,
+    p,
+    rng: mkRng(s, me),
+    round: s.round,
+    terr,
+    armies,
+    income,
+    leader,
+    mineIn,
+    owner,
+    desire,
+    goal,
+    prey: -1,
+    guard: NO_SEATS,
+    pending: NO_SEATS,
+    grudge: [],
+    maxOppArmies: 1,
+  };
+  if (personality) {
+    c.pk = TEMPERAMENTS[personality];
+    c.guard = new Set();
+    c.pending = new Set();
+    for (const t of s.diplomacy?.truces ?? []) {
+      if (t.from === me) c.guard.add(t.to);
+      else if (t.to === me) c.guard.add(t.from);
+    }
+    for (const o of s.diplomacy?.offers ?? []) {
+      const other = o.from === me ? o.to : o.to === me ? o.from : -1;
+      if (other >= 0) {
+        c.guard.add(other);
+        c.pending.add(other);
+      }
+    }
+    c.grudge = s.players.map((pl) => Math.min(4, s.players[me].grudges?.[pl.id] ?? 0));
+    for (const pl of s.players) if (pl.id !== me && !pl.eliminated && !pl.neutral) c.maxOppArmies = Math.max(c.maxOppArmies, armies[pl.id]);
+  }
   if (p.hunt && !s.phase.kind.startsWith('setup')) c.prey = findPrey(c, huntExtra(c));
   return c;
+}
+
+/** A neighbouring stack's weight as a threat: a truce partner's counts for less (personality only). */
+function threatArmies(c: Ctx, x: TerritoryState): number {
+  return c.pk && c.guard.has(x.owner) ? x.armies * c.pk.trust : x.armies;
+}
+
+/** Enemy neighbours worth planning an attack on: truce partners are skipped (personality only). */
+function targetNeighbors(c: Ctx, t: TerritoryId): TerritoryId[] {
+  const xs = enemyNeighbors(c, t);
+  return c.pk && c.guard.size ? xs.filter((n) => !c.guard.has(c.s.territories[n].owner)) : xs;
 }
 
 /** Armies we could still add this turn (reinforcements left + a tradeable set). */
@@ -134,7 +202,8 @@ function findPrey(c: Ctx, extra: number): PlayerId {
   let best = -1;
   let bestV = 0;
   for (const v of s.players) {
-    if (v.id === c.me || v.eliminated) continue;
+    if (v.id === c.me || v.eliminated || v.neutral) continue;
+    if (c.pk && c.pk.breakBar === Infinity && c.guard.has(v.id)) continue; // never hunts a partner
     const theirs = TERRITORY_IDS.filter((t) => s.territories[t].owner === v.id);
     if (theirs.length === 0 || theirs.length > 9) continue;
     let cost = 0;
@@ -152,7 +221,7 @@ function findPrey(c: Ctx, extra: number): PlayerId {
     }
     force += biggest * 0.4; // the main stack counts in full
     if (force < cost * 1.1) continue;
-    const alive = s.players.filter((p) => !p.eliminated).length;
+    const alive = s.players.filter((p) => !p.eliminated && !p.neutral).length;
     const value = 3 + v.cards.length * 3 + (alive === 2 ? 50 : 0) - theirs.length * 0.3;
     if (value > bestV) {
       bestV = value;
@@ -184,7 +253,7 @@ function maxThreat(c: Ctx, t: TerritoryId, except?: TerritoryId): number {
   for (const n of ADJACENCY[t]) {
     if (n === except) continue;
     const x = c.s.territories[n];
-    if (x.owner !== c.me && x.owner >= 0) m = Math.max(m, x.armies);
+    if (x.owner !== c.me && x.owner >= 0) m = Math.max(m, c.pk ? threatArmies(c, x) : x.armies);
   }
   return m;
 }
@@ -194,7 +263,7 @@ function sumThreat(c: Ctx, t: TerritoryId, except?: TerritoryId): number {
   for (const n of ADJACENCY[t]) {
     if (n === except) continue;
     const x = c.s.territories[n];
-    if (x.owner !== c.me && x.owner >= 0) m += x.armies;
+    if (x.owner !== c.me && x.owner >= 0) m += c.pk ? threatArmies(c, x) : x.armies;
   }
   return m;
 }
@@ -218,10 +287,17 @@ function targetValue(c: Ctx, n: TerritoryId): number {
   if (x.owner >= 0) {
     const victim = s.players[x.owner];
     const vt = c.terr[x.owner];
-    if (vt <= 4) v += (c.p.elimWeight * (1 + victim.cards.length * 1.2)) / vt;
+    if (vt <= 4 && !victim.neutral) v += (c.p.elimWeight * (1 + victim.cards.length * 1.2)) / vt;
     if (x.owner === c.leader) v += c.p.leaderWeight;
     if (x.owner === c.prey) v += 4 + victim.cards.length * 1.5;
+    if (c.pk) {
+      v += c.pk.grudgeWeight * (c.grudge[x.owner] ?? 0);
+      if (c.pk.weakBias > 0 && !victim.neutral) v += c.pk.weakBias * 0.6 * (1 - c.armies[x.owner] / c.maxOppArmies);
+    }
   }
+  // Turtle: wandering off costs, and costs more once the turn's card is in hand.
+  if (c.pk && c.pk.homeBias > 0 && cont !== c.goal && c.mineIn[cont] * 2 < info.territories.length)
+    v -= c.pk.homeBias * (s.conqueredThisTurn ? 1.6 : 1);
   return v;
 }
 
@@ -263,7 +339,7 @@ function chooseClaim(c: Ctx): Action {
 function stagingScore(c: Ctx, b: TerritoryId, extra: number): number {
   const a = c.s.territories[b].armies + extra;
   let best = 0;
-  for (const n of enemyNeighbors(c, b)) {
+  for (const n of targetNeighbors(c, b)) {
     const d = c.s.territories[n].armies;
     const v = targetValue(c, n) * (0.25 + winProbability(a, d));
     if (v > best) best = v;
@@ -296,6 +372,7 @@ function chainValue(c: Ctx, start: TerritoryId, armies: number, depth: number): 
       if (taken.has(n)) continue;
       const o = s.territories[n].owner;
       if (o === c.me || o < 0) continue;
+      if (c.pk && c.guard.has(o)) continue;
       const p = winProbability(a, s.territories[n].armies);
       if (p < thr) continue;
       const cont = TERRITORIES[n].continent;
@@ -453,7 +530,7 @@ function wantsOptionalTrade(c: Ctx, ph: Extract<Phase, { kind: 'reinforce' }>): 
       }
       if (deficit > ph.remaining) return true;
       if (c.prey >= 0) return true;
-      const weak = s.players.some((pl) => pl.id !== c.me && !pl.eliminated && c.terr[pl.id] <= 3 && pl.cards.length >= 2);
+      const weak = s.players.some((pl) => pl.id !== c.me && !pl.eliminated && !pl.neutral && c.terr[pl.id] <= 3 && pl.cards.length >= 2);
       return weak || value >= 8;
     }
   }
@@ -507,6 +584,12 @@ function bestAttack(c: Ctx): AttackPlan | null {
         const left = Number.isFinite(odds.expectedAttackersLeftIfWin) ? Math.floor(odds.expectedAttackersLeftIfWin) - 1 : 0;
         if (left >= 2) v += 0.6 * chainValue(c, to, left, c.p.lookahead - 1);
       }
+      if (c.pk && c.pk.weakBias > 0) {
+        const ratio = fs.armies / Math.max(1, d);
+        if (ratio >= 3) v += c.pk.weakBias;
+        else if (ratio < 1.6) v -= c.pk.fairFightPenalty;
+      }
+      if (c.pk && c.pk.pressBias > 0 && d >= 3) v += c.pk.pressBias * Math.min(1, d / 8);
       let score = p * v - (odds.expectedAttackerLosses / Math.max(4, fs.armies)) * 1.2;
       if (c.p.overextendCare > 0) {
         const left = Number.isFinite(odds.expectedAttackersLeftIfWin) ? odds.expectedAttackersLeftIfWin + stopAt - 1 : 1;
@@ -516,6 +599,10 @@ function bestAttack(c: Ctx): AttackPlan | null {
       }
       score = noisy(c, score);
       if (score <= 0.05) continue;
+      if (c.pk && c.guard.has(s.territories[to].owner)) {
+        // A truce holds unless this attack is worth the broken word (and never while an offer waits).
+        if (c.pending.has(s.territories[to].owner) || score < c.pk.breakBar) continue;
+      }
       if (!best || score > best.score) best = { from, to, stopAt, p, score };
     }
   }
@@ -539,8 +626,8 @@ function chooseOccupy(c: Ctx, ph: Extract<Phase, { kind: 'occupy' }>): Action {
   else if (tTo === 0) count = min;
   else {
     // Push forward if the new territory has juicier targets; keep enough home to hold.
-    const oppTo = enemyNeighbors(c, to).reduce((m, n) => Math.max(m, targetValue(c, n)), 0);
-    const oppFrom = enemyNeighbors(c, from).reduce((m, n) => Math.max(m, targetValue(c, n)), 0);
+    const oppTo = targetNeighbors(c, to).reduce((m, n) => Math.max(m, targetValue(c, n)), 0);
+    const oppFrom = targetNeighbors(c, from).reduce((m, n) => Math.max(m, targetValue(c, n)), 0);
     const wTo = tTo + oppTo * 3;
     const wFrom = tFrom + oppFrom * 3;
     count = Math.round(min + (max - min) * (wTo / (wTo + wFrom)) * 1.1);
@@ -601,6 +688,10 @@ export function decide(s: GameState, me: PlayerId): Action {
     case 'setup-place':
       return choosePlacement(c, ph.toPlace, 0, 'setupPlace');
     case 'reinforce': {
+      if (c.pk && !ph.midTurn) {
+        const prop = chooseTruceProposal(s, me);
+        if (prop) return { type: 'proposeTruce', player: me, to: prop.to, rounds: prop.rounds, kind: prop.kind };
+      }
       if (ph.mustTrade || wantsOptionalTrade(c, ph)) {
         const ids = bestTrade(c);
         if (ids) return { type: 'trade', player: me, cardIds: ids };
@@ -628,4 +719,12 @@ export function decide(s: GameState, me: PlayerId): Action {
     case 'game-over':
       return { type: 'setController', player: me, kind: s.players[me].kind, ...(s.players[me].difficulty ? { difficulty: s.players[me].difficulty } : {}) };
   }
+}
+
+/**
+ * How much `me` wants enemy territory `t` right now (noise-free, the number the attack and placement
+ * choices are built on). For tests and tooling; the UI should not need it.
+ */
+export function targetValueFor(s: GameState, me: PlayerId, t: TerritoryId): number {
+  return targetValue(buildCtx(s, me), t);
 }

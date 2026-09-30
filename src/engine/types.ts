@@ -74,6 +74,11 @@ export type PlayerColorId = 'crimson' | 'cobalt' | 'emerald' | 'amber' | 'violet
 
 export type PlayerKind = 'human' | 'ai';
 export type AiDifficulty = 'easy' | 'normal' | 'hard';
+/**
+ * How an AI seat plays, on top of its difficulty (additive, optional). Unset = the classic AI, exactly as
+ * before: no grudges in its choices, no truces. See `PERSONALITIES` in src/engine/ai/personality.ts.
+ */
+export type AiPersonality = 'turtle' | 'opportunist' | 'warlord';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -85,6 +90,8 @@ export interface PlayerConfig {
   kind: PlayerKind;
   /** Required when kind === 'ai'. */
   difficulty?: AiDifficulty;
+  /** AI seats only (additive): how this seat plays. Unset = the classic AI. */
+  personality?: AiPersonality;
 }
 
 export interface GameConfig {
@@ -108,6 +115,16 @@ export interface GameConfig {
   turnLimit: number | null;
   /** Seed for the game's PRNG. Same seed + same actions = same game. */
   seed: number;
+  /**
+   * Additive: humans may propose and answer truces. Off (default) = truces run only between AI seats
+   * with a personality, and AIs never offer one to a human.
+   */
+  diplomacy?: boolean;
+  /**
+   * Additive: with exactly 2 players, deal a third, neutral seat (classic 2-player house rule). It holds
+   * a third of the board, never takes a turn, never attacks, and defends normally. Ignored for 3–4 players.
+   */
+  neutral?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +175,18 @@ export interface PlayerState {
   /** Starting armies still to place during setup. 0 once setup is done. */
   setupArmies: number;
   stats: PlayerStats;
+  /** Additive: AI personality (see AiPersonality). */
+  personality?: AiPersonality;
+  /** Additive: the neutral seat of a 2-player game. Never takes a turn, never wins, holds no cards. */
+  neutral?: boolean;
+  /**
+   * Additive, read-only for the UI: how much this seat wants payback, by seat. Rises when a seat takes
+   * its territories, breaks a truce with it, or eliminates a seat it had a truce with; decays each round.
+   * Absent until the first grudge. Every seat keeps one (humans too); only personality AIs act on it.
+   */
+  grudges?: Partial<Record<PlayerId, number>>;
+  /** Additive: truces this seat has broken this game. Costs standing with every AI. */
+  truceBreaks?: number;
 }
 
 export type Phase =
@@ -198,6 +227,41 @@ export type Phase =
 
 export type PhaseKind = Phase['kind'];
 
+// ---------------------------------------------------------------------------
+// Diplomacy (additive)
+// ---------------------------------------------------------------------------
+
+export type TruceKind = 'noAttack';
+
+/** A truce offer: `from` proposes to `to` that neither attacks the other for `rounds` rounds. */
+export interface TruceProposal {
+  from: PlayerId;
+  to: PlayerId;
+  rounds: number;
+  kind: TruceKind;
+}
+
+/** An agreed truce. It holds from round `since` until round `until` starts (then truceExpired). */
+export interface Truce extends TruceProposal {
+  since: number;
+  until: number;
+}
+
+/** A proposal waiting for a human's answer (only with config.diplomacy). Lapses when `to`'s next turn ends. */
+export interface TruceOffer extends TruceProposal {
+  /** Turn number the offer was made on. */
+  turn: number;
+}
+
+export interface DiplomacyState {
+  truces: Truce[];
+  offers: TruceOffer[];
+  /** Last turn number each seat proposed on (one proposal per turn). */
+  proposedOn: Partial<Record<PlayerId, number>>;
+  /** Recent refusals, so an AI doesn't ask the same seat every turn. Pruned after a few rounds. */
+  rebuffs: { from: PlayerId; to: PlayerId; round: number }[];
+}
+
 /** One sample per round start, for the end-of-game chart. */
 export interface TimelinePoint {
   round: number;
@@ -230,6 +294,8 @@ export interface GameState {
   /** PRNG state (uint32). Only the engine advances it. */
   rng: number;
   timeline: TimelinePoint[];
+  /** Additive: truces and offers. Absent until the first proposal. */
+  diplomacy?: DiplomacyState;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +319,14 @@ export type Action =
   /** Ends the turn from 'attack' or 'fortify' (skips fortifying). */
   | { type: 'endTurn'; player: PlayerId }
   /** Hand a seat to the AI or back to a human (e.g. a friend leaves). Allowed any time, any player. */
-  | { type: 'setController'; player: PlayerId; kind: PlayerKind; difficulty?: AiDifficulty };
+  | { type: 'setController'; player: PlayerId; kind: PlayerKind; difficulty?: AiDifficulty; personality?: AiPersonality }
+  /**
+   * Additive. The current player offers `to` a truce (main turn, one offer per turn). An AI with a
+   * personality answers at once; a human answers with `answerTruce` (needs config.diplomacy).
+   */
+  | { type: 'proposeTruce'; player: PlayerId; to: PlayerId; rounds: number; kind: TruceKind }
+  /** Additive. A human answers a pending offer from `from`. Allowed out of turn. */
+  | { type: 'answerTruce'; player: PlayerId; from: PlayerId; accept: boolean };
 
 export type ActionType = Action['type'];
 
@@ -323,7 +396,14 @@ export type GameEvent =
   | { type: 'cardDrawn'; player: PlayerId; card: Card }
   | { type: 'cardsCaptured'; player: PlayerId; from: PlayerId; cards: Card[] }
   | { type: 'playerEliminated'; player: PlayerId; by: PlayerId }
-  | { type: 'controllerChanged'; player: PlayerId; kind: PlayerKind; difficulty?: AiDifficulty }
+  | { type: 'controllerChanged'; player: PlayerId; kind: PlayerKind; difficulty?: AiDifficulty; personality?: AiPersonality }
+  // Diplomacy (additive). `truceSentence(state, event)` gives each one plain-English line.
+  | { type: 'truceProposed'; from: PlayerId; to: PlayerId; rounds: number; kind: TruceKind }
+  | { type: 'truceAccepted'; from: PlayerId; to: PlayerId; rounds: number; kind: TruceKind; until: number }
+  | { type: 'truceDeclined'; from: PlayerId; to: PlayerId; rounds: number; kind: TruceKind; reason: 'declined' | 'lapsed' }
+  /** `by` attacked `against` while a truce held. Emitted before the attack's first diceRolled. */
+  | { type: 'truceBroken'; by: PlayerId; against: PlayerId; from: TerritoryId; to: TerritoryId }
+  | { type: 'truceExpired'; from: PlayerId; to: PlayerId; reason: 'time' | 'eliminated' }
   | { type: 'gameOver'; winner: PlayerId; reason: 'domination' | 'percent' | 'turnLimit' };
 
 export type GameEventType = GameEvent['type'];

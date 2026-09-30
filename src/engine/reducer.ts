@@ -28,9 +28,36 @@
 //   [end of turn]: cardDrawn? → (turn limit reached: gameOver) | turnStarted → phaseChanged(reinforce)
 //   setController: controllerChanged
 //
+// Diplomacy (additive; only personality AIs, or humans with config.diplomacy, ever trigger these):
+//   proposeTruce: truceProposed → (AI target) truceAccepted | truceDeclined   (human target: waits)
+//   answerTruce:  truceAccepted | truceDeclined
+//   attack / blitz on a truce partner: truceBroken → diceRolled ...
+//   conquest that eliminates a seat with truces: ... cardsCaptured? → truceExpired(eliminated) ×N → ...
+//   [end of turn]: cardDrawn? → truceDeclined(lapsed)? → (new round) truceExpired(time) ×N → turnStarted
+//
+// Grudges (PlayerState.grudges) change silently: on every conquest, broken continent, broken truce,
+// and elimination of a truce partner; they decay each new round.
+//
 // Continent events: `continentLost` (previous owner broke) is emitted before `continentGained`.
 
+import { acceptsTruce } from './ai/diplomacy';
+import { isPersonality } from './ai/personality';
 import { bonusTerritoryFor, setValueFor, isValidSetSymbols } from './cards';
+import {
+  addGrudge,
+  cloneDiplomacy,
+  ensureDiplomacy,
+  GRUDGE_BETRAYED,
+  GRUDGE_CONTINENT,
+  GRUDGE_PARTNER_ELIMINATED,
+  GRUDGE_STANDING,
+  GRUDGE_TAKEN,
+  offerBetween,
+  truceBetween,
+  trucePartners,
+  TRUCE_MAX_ROUNDS,
+  TRUCE_MIN_ROUNDS,
+} from './diplomacy';
 import {
   afterTerritoriesAssigned,
   emit,
@@ -63,6 +90,8 @@ import {
   type PlayerId,
   type TerritoryId,
   type TerritoryState,
+  type TruceOffer,
+  type TruceProposal,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -76,15 +105,21 @@ export function cloneState(s: GameState): GameState {
     territories[t] = { owner: x.owner, armies: x.armies };
   }
   const phase: Phase = s.phase.kind === 'reinforce' ? { ...s.phase, placed: { ...s.phase.placed } } : { ...s.phase };
-  return {
+  const out: GameState = {
     ...s,
-    players: s.players.map((p) => ({ ...p, cards: [...p.cards], stats: { ...p.stats } })),
+    players: s.players.map((p) => {
+      const c = { ...p, cards: [...p.cards], stats: { ...p.stats } };
+      if (p.grudges) c.grudges = { ...p.grudges };
+      return c;
+    }),
     territories,
     phase,
     deck: [...s.deck],
     discard: [...s.discard],
     timeline: [...s.timeline],
   };
+  if (s.diplomacy) out.diplomacy = cloneDiplomacy(s.diplomacy);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +140,8 @@ const ACTION_TYPES = new Set([
   'fortify',
   'endTurn',
   'setController',
+  'proposeTruce',
+  'answerTruce',
 ]);
 
 const isPosInt = (x: unknown): x is number => typeof x === 'number' && Number.isInteger(x) && x >= 1;
@@ -157,6 +194,15 @@ function validateInner(state: GameState, action: Action): string | null {
     if (a.kind !== 'human' && a.kind !== 'ai') return 'A seat is either human or AI.';
     if (a.difficulty !== undefined && a.difficulty !== 'easy' && a.difficulty !== 'normal' && a.difficulty !== 'hard')
       return 'AI difficulty must be easy, normal, or hard.';
+    if (a.personality !== undefined && !isPersonality(a.personality)) return 'AI personality must be turtle, opportunist, or warlord.';
+    return null;
+  }
+
+  if (a.type === 'answerTruce') {
+    if (state.phase.kind === 'game-over') return 'The game is over.';
+    if (typeof a.accept !== 'boolean') return 'Answer the truce with yes or no.';
+    const o = state.diplomacy?.offers.find((x) => x.from === a.from && x.to === a.player);
+    if (!o) return 'There is no truce offer to answer.';
     return null;
   }
 
@@ -280,6 +326,24 @@ function validateInner(state: GameState, action: Action): string | null {
       if (ph.kind !== 'attack' && ph.kind !== 'fortify') return phaseBlurb(state);
       return null;
     }
+    case 'proposeTruce': {
+      if (ph.kind !== 'reinforce' && ph.kind !== 'attack' && ph.kind !== 'fortify')
+        return 'Offer a truce during your turn, not in the middle of a move.';
+      if (typeof a.to !== 'number' || !Number.isInteger(a.to) || !state.players[a.to]) return 'No such player.';
+      if (a.to === a.player) return "You can't make a truce with yourself.";
+      const them = state.players[a.to];
+      if (them.eliminated) return `${them.name} is out of the game.`;
+      if (them.neutral || me.neutral) return 'The neutral armies make no truces.';
+      if (a.kind !== 'noAttack') return 'The only truce is a no-attack truce.';
+      if (!Number.isInteger(a.rounds) || a.rounds < TRUCE_MIN_ROUNDS || a.rounds > TRUCE_MAX_ROUNDS)
+        return `A truce lasts ${TRUCE_MIN_ROUNDS} to ${TRUCE_MAX_ROUNDS} rounds.`;
+      if ((me.kind === 'human' || them.kind === 'human') && !state.config.diplomacy)
+        return 'Truces with human players are off in this game.';
+      if (truceBetween(state, a.player, a.to)) return `${me.name} and ${them.name} already have a truce.`;
+      if (offerBetween(state, a.player, a.to)) return `A truce offer between ${me.name} and ${them.name} is already waiting.`;
+      if (state.diplomacy?.proposedOn[a.player] === state.turn) return 'One truce offer per turn.';
+      return null;
+    }
   }
   return "That action isn't recognized.";
 }
@@ -309,7 +373,24 @@ function execute(d: Draft, a: Action): void {
       p.kind = a.kind;
       if (a.kind === 'ai') p.difficulty = a.difficulty ?? p.difficulty ?? 'normal';
       else delete p.difficulty;
-      emit(d, { type: 'controllerChanged', player: a.player, kind: a.kind, ...(p.difficulty ? { difficulty: p.difficulty } : {}) });
+      if (a.personality) p.personality = a.personality;
+      emit(d, {
+        type: 'controllerChanged',
+        player: a.player,
+        kind: a.kind,
+        ...(p.difficulty ? { difficulty: p.difficulty } : {}),
+        ...(a.personality ? { personality: a.personality } : {}),
+      });
+      return;
+    }
+    case 'proposeTruce':
+      return doPropose(d, { from: a.player, to: a.to, rounds: a.rounds, kind: a.kind });
+    case 'answerTruce': {
+      const dip = ensureDiplomacy(s);
+      const i = dip.offers.findIndex((x) => x.from === a.from && x.to === a.player);
+      const o = dip.offers[i];
+      dip.offers.splice(i, 1);
+      resolveOffer(d, o, a.accept);
       return;
     }
     case 'claim': {
@@ -321,7 +402,7 @@ function execute(d: Draft, a: Action): void {
       if (TERRITORY_IDS.every((t) => s.territories[t].owner !== UNCLAIMED)) {
         afterTerritoriesAssigned(d);
       } else {
-        s.currentPlayer = (a.player + 1) % s.players.length;
+        s.currentPlayer = nextSeat(s, a.player, (p) => !s.players[p].neutral)!.player;
       }
       return;
     }
@@ -364,12 +445,14 @@ function execute(d: Draft, a: Action): void {
       setPhase(d, { kind: 'attack' });
       return;
     case 'attack': {
+      breakTruceIfAny(d, a.player, a.from, a.to);
       const dice = rollBattle(d, a.from, a.to, a.dice, false);
       if (s.territories[a.to].armies === 0) conquer(d, a.from, a.to, dice);
       return;
     }
     case 'blitz': {
       const stopAt = a.stopAt ?? 1;
+      breakTruceIfAny(d, a.player, a.from, a.to);
       const from = s.territories[a.from];
       const to = s.territories[a.to];
       // Each roll removes at least one army, so this terminates; the guard is belt-and-braces.
@@ -403,6 +486,72 @@ function execute(d: Draft, a: Action): void {
       finishTurn(d);
       return;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Diplomacy
+// ---------------------------------------------------------------------------
+
+function doPropose(d: Draft, prop: TruceProposal): void {
+  const s = d.s;
+  const dip = ensureDiplomacy(s);
+  dip.proposedOn = { ...dip.proposedOn, [prop.from]: s.turn };
+  emit(d, { type: 'truceProposed', ...prop });
+  if (s.players[prop.to].kind === 'ai') {
+    resolveOffer(d, prop, acceptsTruce(s, prop));
+    return;
+  }
+  dip.offers.push({ ...prop, turn: s.turn });
+}
+
+function resolveOffer(d: Draft, prop: TruceProposal, accept: boolean): void {
+  const s = d.s;
+  const dip = ensureDiplomacy(s);
+  const base = { from: prop.from, to: prop.to, rounds: prop.rounds, kind: prop.kind };
+  if (accept) {
+    const until = s.round + prop.rounds + 1;
+    dip.truces.push({ ...base, since: s.round, until });
+    emit(d, { type: 'truceAccepted', ...base, until });
+  } else {
+    dip.rebuffs.push({ from: prop.from, to: prop.to, round: s.round });
+    emit(d, { type: 'truceDeclined', ...base, reason: 'declined' });
+  }
+}
+
+/** Attacking a truce partner is legal; it ends the truce and costs standing with everyone. */
+function breakTruceIfAny(d: Draft, by: PlayerId, from: TerritoryId, to: TerritoryId): void {
+  const s = d.s;
+  if (!s.diplomacy) return;
+  const against = s.territories[to].owner;
+  const dip = s.diplomacy;
+  // An attack withdraws any offer still waiting between the two.
+  for (let i = dip.offers.length - 1; i >= 0; i--) {
+    const o = dip.offers[i];
+    if ((o.from === by && o.to === against) || (o.from === against && o.to === by)) {
+      dip.offers.splice(i, 1);
+      emit(d, { type: 'truceDeclined', from: o.from, to: o.to, rounds: o.rounds, kind: o.kind, reason: 'lapsed' });
+    }
+  }
+  const t = truceBetween(s, by, against);
+  if (!t) return;
+  dip.truces = dip.truces.filter((x) => x !== t);
+  const p = s.players[by];
+  p.truceBreaks = (p.truceBreaks ?? 0) + 1;
+  addGrudge(s, against, by, GRUDGE_BETRAYED);
+  for (const o of s.players) if (o.id !== by && o.id !== against && !o.eliminated) addGrudge(s, o.id, by, GRUDGE_STANDING);
+  emit(d, { type: 'truceBroken', by, against, from, to });
+}
+
+/** A seat is out: its truce partners hold it against the conqueror, and its truces and offers end. */
+function endDiplomacyFor(d: Draft, gone: PlayerId, by: PlayerId): void {
+  const s = d.s;
+  if (!s.diplomacy) return;
+  const dip = s.diplomacy;
+  for (const z of trucePartners(s, gone)) if (z !== by) addGrudge(s, z, by, GRUDGE_PARTNER_ELIMINATED);
+  const ending = dip.truces.filter((t) => t.from === gone || t.to === gone);
+  dip.truces = dip.truces.filter((t) => t.from !== gone && t.to !== gone);
+  dip.offers = dip.offers.filter((o) => o.from !== gone && o.to !== gone);
+  for (const t of ending) emit(d, { type: 'truceExpired', from: t.from, to: t.to, reason: 'eliminated' });
 }
 
 function doTrade(d: Draft, player: PlayerId, cardIds: [number, number, number]): void {
@@ -486,6 +635,7 @@ function conquer(d: Draft, from: TerritoryId, to: TerritoryId, lastDice: number)
   s.players[attacker].stats.territoriesConquered++;
   emit(d, { type: 'territoryConquered', player: attacker, from, to, previousOwner: prev });
   updatePeak(d, attacker);
+  if (prev >= 0) addGrudge(s, prev, attacker, GRUDGE_TAKEN);
 
   if (prev >= 0 && territoryCount(s, prev) === 0) {
     const loser = s.players[prev];
@@ -499,6 +649,7 @@ function conquer(d: Draft, from: TerritoryId, to: TerritoryId, lastDice: number)
       s.players[attacker].cards = [...s.players[attacker].cards, ...captured];
       emit(d, { type: 'cardsCaptured', player: attacker, from: prev, cards: captured });
     }
+    endDiplomacyFor(d, prev, attacker);
   }
 
   const max = s.territories[from].armies - 1;
@@ -533,6 +684,7 @@ function completeOccupy(
   const others = CONTINENTS[c].territories.filter((x) => x !== to);
   if (prev >= 0 && others.every((x) => s.territories[x].owner === prev)) {
     emit(d, { type: 'continentLost', player: prev, continent: c, to: player });
+    addGrudge(s, prev, player, GRUDGE_CONTINENT);
   }
   if (CONTINENTS[c].territories.every((x) => s.territories[x].owner === player)) {
     emit(d, { type: 'continentGained', player, continent: c });
@@ -548,4 +700,20 @@ function completeOccupy(
     return;
   }
   if (fromOccupyPhase) setPhase(d, { kind: 'attack' });
+}
+
+// ---------------------------------------------------------------------------
+// Diplomacy read helpers (for the UI)
+// ---------------------------------------------------------------------------
+
+/** Seats `player` may offer a truce to right now (empty when it isn't their move or diplomacy forbids it). */
+export function truceTargets(state: GameState, player: PlayerId, rounds = 3): PlayerId[] {
+  return state.players
+    .filter((p) => validateAction(state, { type: 'proposeTruce', player, to: p.id, rounds, kind: 'noAttack' }) === null)
+    .map((p) => p.id);
+}
+
+/** Offers waiting for `player`'s answer (send `answerTruce`). */
+export function truceOffersTo(state: GameState, player: PlayerId): TruceOffer[] {
+  return (state.diplomacy?.offers ?? []).filter((o) => o.to === player);
 }
