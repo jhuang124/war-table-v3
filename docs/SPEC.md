@@ -10,7 +10,7 @@ Contracts already written (read them before anything else):
 | File | What it fixes |
 |---|---|
 | `src/engine/types.ts` | Game state, actions, events: the core contract |
-| `src/engine/mapData.ts` | 42 territories, 6 continents, 83 borders, card symbols, starting armies |
+| `src/engine/mapData.ts` | 42 territories, 6 continents, 83 borders, card symbols, starting armies (read from `maps/classic/`) |
 | `src/map/types.ts` | Board geometry format (map pipeline → renderer) |
 | `src/render/BoardView.ts` | Renderer interface (renderer ↔ controller) |
 | `src/shared/palette.ts` | Player colors, seat emblems |
@@ -28,7 +28,8 @@ report. Contract changes the new UX needs are listed in §11 and are applied by 
 
 ```
 src/engine/      pure TS, no DOM. Rules, reducer, setup, RNG, AI. Runs in browser and Node.
-src/map/         board.json (generated) + loader. Geometry only.
+maps/<id>/       map packs: pack.json, rules.json, topology.json, board.json (generated); docs/MAPS.md
+src/map/         the map-pack loader (packs.ts rules, registry.ts geometry, index.ts BOARD). No data.
 scripts/         build-map.ts, verify-map.ts, simulate.ts (AI-vs-AI soak)
 src/render/      Three.js board: scene, tiles, pieces, dice, effects, camera, picking.
 src/game/        controller: event queue, input state machine, AI driver, save/load, hooks, copy.
@@ -165,9 +166,13 @@ difficulty and average game length. Hard should beat easy clearly.
 
 ---
 
-## 5. Map (`scripts/build-map.ts` → `src/map/board.json`)
+## 5. Map (`scripts/build-map.ts --map <id>` → `maps/<id>/board.json`)
 
-Real geography, stylized. Built once, committed; the app only loads the JSON.
+Maps are packs, one folder each under `maps/<id>/` (classic, true-world); **docs/MAPS.md** is the
+format, the build and verify steps, and what an author checks by hand. `GameConfig.mapId` names the
+pack (absent = classic). Real geography, stylized. Built once, committed; the app only loads the JSON,
+through `src/map/registry.ts`. What follows is how the classic board is built (its recipe is
+`scripts/map/packs/classic/`); its `board.json` is pinned byte for byte by `verify:map`.
 
 - Source: `world-atlas` (Natural Earth, 50m preferred) via `topojson-client`. Assign each country to a
   territory; split big countries (USA, Canada, Russia, Kazakhstan, China/Indonesia if needed, Australia…)
@@ -181,13 +186,14 @@ Real geography, stylized. Built once, committed; the app only loads the JSON.
   area, keep recognizable islands (GB, Ireland, Iceland, Japan, Madagascar, Sri Lanka, New Guinea,
   Borneo/Sumatra/Java, Greenland…). Non-playable land (e.g. New Zealand, Caribbean) → `decorativeLand`.
 - Anchors: `polylabel` pole of inaccessibility on the main polygon, hand-overridable.
-- **Adjacency must match `BORDERS` exactly** (`npm run verify:map`):
-  - territories whose geometry touches must be a border in `BORDERS` (no extra land borders),
-  - every border in `BORDERS` either touches in geometry or has a `seaLanes` entry,
+- **Adjacency must match the pack's `topology.json` exactly** (`npm run verify:map -- --map <id>`):
+  - territories whose geometry touches must be a border (no extra land borders),
+  - every border either touches in geometry or has a `seaLanes` entry,
   - sea lanes are short, plausible crossings (Alaska–Kamchatka wraps the edge),
   - all 42 present, polygons valid (no self-intersections), CCW outers.
-- Verify writes a preview image (`artifacts/map/preview.png`, via Playwright rendering an SVG) with
-  owners colored, anchors, labels, lanes. Look at it.
+- Verify writes preview images (`artifacts/map/<id>/preview*.png`, via Playwright rendering an SVG) with
+  owners colored, anchors, labels, lanes. Look at them. `scripts/map/board-shots.ts` shoots the pack on
+  the real board (`artifacts/maps/`).
 
 ---
 

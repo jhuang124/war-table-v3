@@ -125,6 +125,13 @@ export interface GameConfig {
    * a third of the board, never takes a turn, never attacks, and defends normally. Ignored for 3–4 players.
    */
   neutral?: boolean;
+  /**
+   * Optional (additive, v3 map packs): which map pack this game is played on (`maps/<id>/`, see
+   * docs/MAPS.md and src/map/registry.ts). Absent = 'classic', so every save written before map packs
+   * loads the classic board. Today every playable pack shares the classic rules and topology, so the
+   * engine's rules are unchanged by this field; the renderer picks the pack's geometry from it.
+   */
+  mapId?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 import { isPersonality } from './ai/personality';
 import { buildDeck } from './cards';
 import { afterTerritoriesAssigned, emit, setPhase, updatePeak, type Draft } from './flow';
-import { STARTING_ARMIES, TERRITORY_IDS } from './mapData';
+import { STARTING_ARMIES, TERRITORY_IDS, mapIdOf } from './mapData';
 import { randInt, shuffleInPlace, toSeed } from './rng';
 import {
   UNCLAIMED,
@@ -90,6 +90,8 @@ export function sanitizeConfig(config: GameConfig): GameConfig {
   // Additive flags: only written when on, so a classic config sanitizes to exactly what it did before.
   if (config.diplomacy === true) out.diplomacy = true;
   if (config.neutral === true && n === 2) out.neutral = true;
+  // Map packs (docs/MAPS.md): keep the map so the save carries it; an unknown id plays classic.
+  if (typeof config.mapId === 'string' && config.mapId) out.mapId = mapIdOf(config.mapId);
   return out;
 }
 

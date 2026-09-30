@@ -18,7 +18,7 @@ Read SOUL.md first, and run its "Before you plan" checklist before you plan, del
   override. Tools, not in the suite: `tests/e2e/screens.ts` (screenshot sweep), `tests/e2e/perf.ts`
   (frame times); both need a server on `RISK_URL`.
 - `npm run typecheck` — tsc
-- `npm run build:map` / `npm run verify:map` — regenerate / check `src/map/board.json`
+- `npm run build:map -- --map <id>` / `npm run verify:map -- --map <id>` (or `verify:maps`) — regenerate / check `maps/<id>/board.json` (docs/MAPS.md; classic is hash-pinned)
 - `npm run sim [games]` — AI-vs-AI soak + rounds-to-threshold table (paste into `src/game/presets.ts`)
 - `npm run build` — production build to `dist/`
 

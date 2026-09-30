@@ -1,0 +1,142 @@
+# Map packs
+
+A map is a folder, `maps/<id>/`. The game ships two: **classic** (the board War Table has always had)
+and **true-world** (the same 42 territories and rules on a truer world map). A game records its map in
+`GameConfig.mapId`; a game without one (every save from before map packs) is played on classic.
+
+## The format
+
+| File | Who writes it | What it holds |
+|---|---|---|
+| `pack.json` | author | Manifest + presentation: `id`, `name`, one-line `description` for the picker, `extends` (take rules + topology from another pack), `thumbnail`, `presentation.anchorClearance` (army disc room, board units), optional `presentation.anchorOverhang` (armies may overhang water), optional `presentation.home` (camera home rectangle; not read by the renderer yet). |
+| `rules.json` | author | Rules: supported `seats` {min, max}, `startingArmies` per seat count (the setup table), `cardSymbols` cycle, `continents` [{id, name, bonus}] in display order, `territories` [{id, name, continent}] grouped by continent in continent order. That order is canonical: card symbols, AI iteration and label numbering follow it. |
+| `topology.json` | author | Topology: undirected `borders` [[a, b]], and `seaLanes` [{a, b, wrap?}], the borders that cross water. `wrap: true` = the crossing leaves the west edge from `a` and comes back in from the east edge to `b` (at most one per map). |
+| `board.json` | `npm run build:map` | Geometry + placed presentation, the renderer contract `BoardGeometry` (`src/map/types.ts`): territory polygons, bbox, area, army `anchor`, name `labelAnchor`, sea-lane polylines (first point on `a`'s shore, last on `b`'s: the two **shore points** where the crossing's ticks go), continent and ocean label spots, neutral `decorativeLand`, a `projection` note. |
+| `thumb.png` | `npm run verify:map` | 480 px preview for the New-game picker (written when missing, or with `--thumb`). |
+
+The four concerns: **geometry** = `board.json` shapes; **topology** = `topology.json` (+ the lane
+polylines and shore points in `board.json`); **rules** = `rules.json`; **presentation** = `pack.json`
+(+ the placed anchors and labels in `board.json`, and the projection/lenses in the recipe).
+
+A generated pack also has a **recipe**, `scripts/map/packs/<id>/index.ts`, exporting `recipe: MapRecipe`
+(`scripts/map/recipe.ts`): the Natural Earth source file, the projection and lenses, which country (or
+which part of it) becomes which territory, island stretches, lane shore hints (lon/lat), continent and
+ocean label hints, tuning (raster resolution, water gaps, smoothing), and the close-ups `verify:map`
+renders. Recipes are scripts (typechecked, can hold functions), so they live under `scripts/`, not `maps/`.
+
+## Runtime
+
+- `src/map/packs.ts` — manifests + rules + topology of every registered pack, no geometry, no DOM.
+  `src/engine/mapData.ts` reads classic's rules and topology through it (same exports as before).
+- `src/map/registry.ts` — the one geometry loader: `listMaps()` (id, name, description, seats, counts,
+  thumbnail URL, rulesFrom), `getBoard(id)` (the pack's `board.json` with every lane's `shore` filled),
+  `activeMapId()` / `activeBoard()`, `resolveMapId()`.
+- `src/map/index.ts` — `BOARD` is `activeBoard()`: the map this page boots on. In order: `?map=<id>`
+  (dev server and `VITE_E2E` builds only), else the saved game's `state.config.mapId`, else classic.
+  Everything that imported `BOARD` / `seaLaneBetween` from `src/map` gets the active map unchanged.
+- `createGame` keeps `config.mapId` (an unknown id becomes `'classic'`), so the save carries it.
+
+Today the board is chosen once per page load, and the engine plays classic's rules and topology for
+every pack (true-world `extends` classic, so that is exact). Starting a game on another map than the
+page booted on needs the renderer to swap geometry; see "Requests" in the v3 maps report.
+
+## Build and verify
+
+```
+npm run build:map -- --map <id>      # recipe + rules + topology → maps/<id>/board.json (seconds)
+npm run verify:map -- --map <id>     # checks + previews in artifacts/map/<id>/ (+ thumb.png if missing)
+npm run verify:maps                  # every shipped pack, no previews
+```
+
+`build:map` without `--map` builds classic. The pipeline (`scripts/map/pipeline.ts`) is deterministic:
+the same inputs give the same bytes. **Classic is pinned**: `verify:map` fails if `maps/classic/board.json`
+differs by a byte from the pre-pack board (sha256 `a4b77df4…`), and so does
+`tests/map/registry.test.ts`. If you change classic on purpose, update both hashes and say so.
+
+`verify:map` checks, and fails on:
+- the hand-written files: ids, names, bonuses, seats 2..4 with a starting-army entry per seat count
+  (enough to cover every territory), territories grouped by continent, borders naming known
+  territories, no duplicates, sea lanes ⊂ borders, at most one wrap, one connected board;
+- geometry: every territory present, valid polygons (CCW outers, CW holes, no self-crossings, no
+  overlaps), no point-like touches, non-neighbours at least 0.25 apart, decorative land touching nothing;
+- adjacency: land contacts ∪ sea lanes = `topology.json` borders exactly, the board's lanes = the
+  topology's lanes (same direction, same wrap);
+- armies: each anchor inside its main polygon with `anchorClearance` of room (or, with
+  `anchorOverhang`, at least `ownLand` of own land and `anchorClearance` from every other territory's
+  land, open water allowed under the disc); no two discs overlap; neighbours' anchors at least 1.6
+  apart (room for two ~1.3-unit v3 stacks with a gap); it prints each European anchor's distance to
+  the nearest other land;
+- lanes: shore points on the right coasts, at most 0.3 units over unrelated land, **at least 60 % over
+  open water** (visible water = adjacency), wrap lanes run off both edges;
+- continent and ocean labels on water.
+
+It prints a NOTE, not a failure, when a pack has its own rules: such a pack builds and verifies but is
+not playable until the engine reads rules per game.
+
+## Adding a map
+
+1. `maps/<id>/pack.json` (lowercase-kebab id). Either `"extends": "<pack>"` for a new drawing of an
+   existing board, or write `rules.json` + `topology.json`.
+2. A generated map: write `scripts/map/packs/<id>/index.ts` (copy true-world's), run `build:map`,
+   then `verify:map` and look at every preview. A hand-drawn map: write `board.json` yourself to the
+   `BoardGeometry` contract (anchors, label spots and lanes included) and run `verify:map`.
+3. Register it: its JSON imports in `src/map/packs.ts` (`PACK_FILES`) and its `board.json` +
+   `thumb.png` in `src/map/registry.ts`. Registration order is picker order.
+4. `npm test`, `npm run typecheck`, `npm run test:e2e smoke flow` with `RISK_QUERY='?map=<id>'`.
+5. On the real board: a dev server on a free port, then `npx tsx scripts/map/board-shots.ts --map <id>
+   --url http://127.0.0.1:<port>/` (rest shot, close-ups with a crossing aimed, phone tap check, and
+   the home scale in px per board unit), and `npx tsx scripts/map/land-pixels.ts` on the rest shots to
+   compare how much land a pack puts on screen against classic.
+
+The camera frames the land's outline (convex hull of every territory), not the board rectangle, so
+ocean margins don't change the framing; the land outline's aspect against the screen does. A pack
+whose land is taller for its width than classic's frames by height, and its armies come out smaller.
+
+### What an author hand-verifies (the checks can't)
+
+- **It reads as the place.** Straits, peninsulas and seas you'd name from across the room are there
+  (Gibraltar, the Bosphorus, Italy, the isthmus, the Bering tips). Look at `preview.png` and the
+  close-ups, and at the real board with `?map=<id>`.
+- **Every border is one a player would guess.** The checker proves geometry = topology; only a person
+  can say a land contact looks like a border and a lane looks like a crossing (short, over water you
+  can see, ticks on both shores).
+- **Armies read.** Overhanging discs sit over water, not over a neighbour's coast; at phone size every
+  territory is still tappable (a disc counts as a target) and the numeral is legible.
+- **Labels fit.** Continent names + bonuses sit on open water near their continent; territory names
+  (shown on hover/select) don't collide at the home zoom.
+- **Balance** (a new board only): bonuses match how hard each continent is to hold (count its
+  borders), starting armies fit the seat counts, and a few `npm run sim` games finish.
+- **The wrap** (if any) looks like one strait continuing off the edge, not two random lines.
+
+## A new board (the small 2–3 player map)
+
+The format already allows it: nothing assumes 42 territories or 6 continents (ids and counts come from
+`rules.json`; raster labels are bytes, so up to ~250 territories). `seats` can be `{ "min": 2, "max": 3 }`.
+What the rest of the game still needs before an original 20–24-territory map is playable:
+
+1. **Engine reads rules per game.** `src/engine` (rules, reducer, flow, setup, cards, summary) and
+   `src/engine/ai/**` use the classic constants from `mapData.ts`. They need to take them from
+   `mapRulesOf(state.config)` instead (the hook exists). `TerritoryId` / `ContinentId` are closed unions
+   in `src/engine/types.ts`; a new board needs them widened to `string` (a contract change for the lead).
+2. **Renderer + controller read territories from the board**, not from `TERRITORY_IDS` / `ADJACENCY` /
+   `CONTINENTS` (src/render imports them in tiles, tokens, ink, overlay, continents, index).
+3. **Presets**: `src/game/presets.ts` rounds-to-threshold tables are measured on 42 territories; rerun
+   `npm run sim` per map. The controller's setup-batch sum uses 42 literally.
+4. **The picker** offers only maps whose `seats` include the table's player count.
+5. Geometry: an original map has no Natural Earth source; hand-draw `board.json` (or add a recipe that
+   reads an SVG). Anchors, label spots and lanes must then be placed by hand or by a small helper.
+
+## True World: what it is
+
+Equal Earth (equal-area) centred on 10.8°E with the Pacific seam at 169.2°W, like every world map; the
+meridians eased 30 % toward straight near the sides (Alaska and Chukotka reach the edges instead of
+curling away; the far north is at most ~12 % wider than true), 87 % of the equator across the board
+(the empty mid-Pacific is cropped), heights ×0.95 (Equal Earth's land is a little tall for a 16:10
+screen under the HUD; at 0.95 it frames like classic: armies the same size on screen, slightly more
+land). One gentle lens: Europe ×1.3 (classic: ×1.5, plus five more lenses). No stretched or grown
+islands: Iceland, Britain, Japan, Madagascar, Indonesia, New Guinea, Scandinavia, Kamchatka and
+Alaska are their real size, so their armies may overhang the water around them (`anchorOverhang`,
+at least 0.25 units of own land under the anchor, never another territory's land). Water gaps between lane ends are 0.6 units
+(classic 0.8), so Gibraltar, the Channel and Bab-el-Mandeb read as straits. The Bering Strait is split
+by the seam, as on a real map: the lane leaves Cape Prince of Wales westward and comes back in to
+Cape Dezhnev.

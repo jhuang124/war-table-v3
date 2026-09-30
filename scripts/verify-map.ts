@@ -1,36 +1,73 @@
-// Checks src/map/board.json against the classic board and renders previews.
-//   npm run verify:map            (checks + previews)
-//   npm run verify:map -- --no-preview
-// Exits non-zero on any failure.
+// Checks a map pack (maps/<id>/: pack.json, rules.json, topology.json, board.json) and renders previews.
+//   npm run verify:map                          (classic: checks + previews)
+//   npm run verify:map -- --map true-world
+//   npm run verify:map -- --map <id> --no-preview
+//   npm run verify:map -- --map <id> --thumb    (also rewrite maps/<id>/thumb.png)
+// Exits non-zero on any failure. docs/MAPS.md lists what each check means and what it can't see.
 
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { BORDERS, TERRITORY_IDS, TERRITORIES } from '../src/engine/mapData';
-import type { TerritoryId } from '../src/engine/types';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { BoardGeometry, PolygonGeom } from '../src/map/types';
 import {
   ringArea, pointInPoly, distToPolyBoundary, segmentsCross, segDist2, SegGrid, polylineLength, type P,
 } from './map/geom';
 import { renderPreviews } from './map/preview';
+import { ROOT, lintPack, loadPack, mapArg, pairKey as key } from './map/pack';
+import type { MapRecipe } from './map/recipe';
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const MIN_CLEARANCE = 1.3;
+/**
+ * sha256 of the classic board.json as it shipped before map packs (src/map/board.json at d3717cc).
+ * The classic pack must stay byte-identical to it; if you change classic on purpose, update this and
+ * say so in the change.
+ */
+const CLASSIC_SHA256 = 'a4b77df40c6fc20d8c4df608ac63dbc05c991db8b2703551d415539b63d5d8e6';
+
 const TOUCH_MIN_LEN = 0.1; // shared boundary shorter than this = point touch, not a border
 const MIN_GAP = 0.25; // non-touching territories must be at least this far apart
 const MAX_LANE_LEN = 14;
 const MAX_FOREIGN = 0.3; // lane length allowed over land of unrelated territories
+const MIN_WATER = 0.6; // share of each lane's length that must be over open water (visible water)
 
-const board = JSON.parse(readFileSync(resolve(ROOT, 'src/map/board.json'), 'utf8')) as BoardGeometry;
+const id = mapArg();
+const pack = loadPack(id);
+const MIN_CLEARANCE = pack.manifest.presentation.anchorClearance;
+const TERRITORY_IDS = pack.territoryIds as (keyof BoardGeometry['territories'])[];
+type TerritoryId = (typeof TERRITORY_IDS)[number];
+const NAMES = pack.names;
+const BORDERS = pack.topology.borders;
+
 const failures: string[] = [];
+const notes: string[] = [];
 const fail = (m: string) => failures.push(m);
-const key = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+for (const p of lintPack(pack)) fail(p);
+
+const boardPath = resolve(pack.dir, 'board.json');
+if (!existsSync(boardPath)) {
+  console.log(`maps/${id}/board.json is missing: run npm run build:map -- --map ${id}`);
+  process.exit(1);
+}
+const bytes = readFileSync(boardPath);
+const sha = createHash('sha256').update(bytes).digest('hex');
+const board = JSON.parse(bytes.toString('utf8')) as BoardGeometry;
+if (id === 'classic' && sha !== CLASSIC_SHA256) fail(`classic board.json changed: sha256 ${sha} ≠ the pre-pack board ${CLASSIC_SHA256}`);
+
+// ------------------------------------------------------------------ engine compatibility
+// The engine plays the classic rules + topology only (src/engine/mapData.ts). A pack with its own
+// rules can be built and verified, but not registered as playable until the engine reads rules per game.
+if (pack.rulesFrom !== 'classic') {
+  const c = loadPack('classic');
+  const same = JSON.stringify(c.rules) === JSON.stringify(pack.rules) && JSON.stringify(c.topology) === JSON.stringify(pack.topology);
+  if (!same) notes.push(`NOT PLAYABLE YET: ${id} has its own rules/topology; the engine plays classic's only (docs/MAPS.md, "A new board")`);
+}
 
 // ------------------------------------------------------------------ presence
 const ids = Object.keys(board.territories);
 for (const t of TERRITORY_IDS) if (!board.territories[t]) fail(`missing territory ${t}`);
 for (const t of ids) if (!TERRITORY_IDS.includes(t as TerritoryId)) fail(`unknown territory ${t}`);
-if (ids.length !== 42) fail(`expected 42 territories, got ${ids.length}`);
+if (ids.length !== TERRITORY_IDS.length) fail(`expected ${TERRITORY_IDS.length} territories, got ${ids.length}`);
+for (const t of ids) if (board.territories[t as TerritoryId].id !== t) fail(`territory ${t} has id ${board.territories[t as TerritoryId].id}`);
 
 // ------------------------------------------------------------------ polygon validity
 type Owner = { t: string; poly: number; ring: number };
@@ -116,13 +153,12 @@ const ek = (a: P, b: P) => {
   const s = `${a[0]},${a[1]}`, u = `${b[0]},${b[1]}`;
   return s < u ? `${s}|${u}` : `${u}|${s}`;
 };
-function eachEdge(t: string, polys: PolygonGeom[], fn: (a: P, b: P) => void) {
+function eachEdge(polys: PolygonGeom[], fn: (a: P, b: P) => void) {
   for (const pg of polys) for (const r of [pg.outer, ...pg.holes]) for (let k = 0; k < r.length; k++) fn(r[k] as P, r[(k + 1) % r.length] as P);
-  void t;
 }
 for (const t of [...TERRITORY_IDS, 'decor'] as string[]) {
   const polys = t === 'decor' ? board.decorativeLand : board.territories[t as TerritoryId]?.polygons ?? [];
-  eachEdge(t, polys, (a, b) => {
+  eachEdge(polys, (a, b) => {
     const k = ek(a, b);
     const set = edgeOwners.get(k) ?? new Set<string>();
     set.add(t);
@@ -142,7 +178,7 @@ for (const [k, set] of edgeOwners) {
 }
 const landPairs = new Set([...shared.entries()].filter(([, l]) => l >= TOUCH_MIN_LEN).map(([k]) => k));
 for (const [k, l] of shared) if (l < TOUCH_MIN_LEN) fail(`point-like touch ${k} (shared ${l.toFixed(3)})`);
-for (const k of landPairs) if (k.includes('decor')) fail(`decorative land touches a territory: ${k}`);
+for (const k of landPairs) if (k.split('|').includes('decor')) fail(`decorative land touches a territory: ${k}`);
 
 // near contacts between non-touching land
 {
@@ -172,21 +208,44 @@ for (const k of landPairs) if (k.includes('decor')) fail(`decorative land touche
   for (const [pk, d] of minGap) if (d < MIN_GAP) fail(`near contact ${pk}: ${d.toFixed(3)} apart (need ≥ ${MIN_GAP} or a real shared border)`);
 }
 
-// ------------------------------------------------------------------ borders == land ∪ lanes
+// ------------------------------------------------------------------ borders == land ∪ lanes, lanes == topology
 const borderSet = new Set(BORDERS.map(([a, b]) => key(a, b)));
+const topoLanes = new Map(pack.topology.seaLanes.map((l) => [key(l.a, l.b), l]));
 const laneSet = new Set<string>();
 for (const lane of board.seaLanes) {
   const k = key(lane.a, lane.b);
   if (laneSet.has(k)) fail(`duplicate sea lane ${k}`);
   laneSet.add(k);
   if (landPairs.has(k)) fail(`sea lane ${k} duplicates a land border`);
+  const spec = topoLanes.get(k);
+  if (!spec) fail(`board has sea lane ${k} that topology.json doesn't list`);
+  else {
+    if (spec.a !== lane.a) fail(`sea lane ${k}: board runs ${lane.a}→${lane.b}, topology.json lists ${spec.a}→${spec.b}`);
+    if (!!spec.wrap !== lane.wrap) fail(`sea lane ${k}: wrap is ${lane.wrap} on the board, ${!!spec.wrap} in topology.json`);
+  }
 }
-const terrLand = new Set([...landPairs].filter((k) => !k.includes('decor')));
-for (const k of terrLand) if (!borderSet.has(k)) fail(`extra land contact ${k} (not a Risk border)`);
-for (const k of laneSet) if (!borderSet.has(k)) fail(`sea lane ${k} is not a Risk border`);
+for (const k of topoLanes.keys()) if (!laneSet.has(k)) fail(`topology.json lane ${k} is missing from the board`);
+const terrLand = new Set([...landPairs].filter((k) => !k.split('|').includes('decor')));
+for (const k of terrLand) if (!borderSet.has(k)) fail(`extra land contact ${k} (not a border in topology.json)`);
+for (const k of laneSet) if (!borderSet.has(k)) fail(`sea lane ${k} is not a border`);
 for (const k of borderSet) if (!terrLand.has(k) && !laneSet.has(k)) fail(`missing border ${k} (no land contact, no lane)`);
 
 // ------------------------------------------------------------------ anchors
+const OVERHANG = pack.manifest.presentation.anchorOverhang ?? null;
+const overhangs: string[] = [];
+/** Distance from (x, y) to the nearest land that isn't t's (other territories + decorative land). */
+function foreignLandDist(t: string, x: number, y: number): number {
+  let d = Infinity;
+  const polys = [
+    ...TERRITORY_IDS.filter((u) => u !== t).flatMap((u) => board.territories[u].polygons),
+    ...board.decorativeLand,
+  ];
+  for (const pg of polys) {
+    if (pointInPoly(x, y, pg)) return 0;
+    d = Math.min(d, distToPolyBoundary(x, y, pg));
+  }
+  return d;
+}
 const clearance = new Map<string, number>();
 for (const t of TERRITORY_IDS) {
   const tg = board.territories[t];
@@ -198,7 +257,15 @@ for (const t of TERRITORY_IDS) {
   if (!pointInPoly(x, y, main)) fail(`${t}: anchor is outside its main polygon`);
   const c = distToPolyBoundary(x, y, main);
   clearance.set(t, c);
-  if (c < MIN_CLEARANCE) fail(`${t}: anchor clearance ${c.toFixed(2)} < ${MIN_CLEARANCE}`);
+  if (!OVERHANG) {
+    if (c < MIN_CLEARANCE) fail(`${t}: anchor clearance ${c.toFixed(2)} < ${MIN_CLEARANCE}`);
+  } else if (c < MIN_CLEARANCE) {
+    // The disc may overhang open water, never another territory's land.
+    if (c < OVERHANG.ownLand - 1e-6) fail(`${t}: anchor has ${c.toFixed(2)} of own land around it < ${OVERHANG.ownLand}`);
+    const f = foreignLandDist(t, x, y);
+    if (f < MIN_CLEARANCE) fail(`${t}: army disc (r ${MIN_CLEARANCE}) reaches other land ${f.toFixed(2)} away`);
+    overhangs.push(`${t} (own ${c.toFixed(2)}, other land ${f.toFixed(2)})`);
+  }
   const [lx, ly] = tg.labelAnchor;
   if (!(lx >= 0 && lx <= board.width && ly >= 0 && ly <= board.height)) fail(`${t}: labelAnchor off the board`);
   const bb = tg.bbox;
@@ -207,6 +274,21 @@ for (const t of TERRITORY_IDS) {
     break;
   }
 }
+
+// Two army discs never overlap, and neighbours' stacks (v3: ~1.3-unit discs) keep a gap between them.
+const MIN_NEIGHBOUR_ANCHOR = 1.6;
+let closestNeighbours: [string, number] = ['', Infinity];
+for (let i = 0; i < TERRITORY_IDS.length; i++)
+  for (let j = i + 1; j < TERRITORY_IDS.length; j++) {
+    const a = board.territories[TERRITORY_IDS[i]]?.anchor, b = board.territories[TERRITORY_IDS[j]]?.anchor;
+    if (!a || !b) continue;
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (d < 2 * MIN_CLEARANCE - 1e-6) fail(`army discs of ${TERRITORY_IDS[i]} and ${TERRITORY_IDS[j]} overlap`);
+    if (borderSet.has(key(TERRITORY_IDS[i], TERRITORY_IDS[j]))) {
+      if (d < MIN_NEIGHBOUR_ANCHOR) fail(`neighbours ${TERRITORY_IDS[i]} and ${TERRITORY_IDS[j]}: anchors ${d.toFixed(2)} apart < ${MIN_NEIGHBOUR_ANCHOR}`);
+      if (d < closestNeighbours[1]) closestNeighbours = [key(TERRITORY_IDS[i], TERRITORY_IDS[j]), d];
+    }
+  }
 
 // ------------------------------------------------------------------ lanes
 const allLand = (x: number, y: number, except: string[]): string | null => {
@@ -226,16 +308,19 @@ for (const lane of board.seaLanes) {
   const len = lane.segments.reduce((s, seg) => s + polylineLength(seg as P[]), 0);
   if (len > MAX_LANE_LEN) fail(`lane ${k} is long (${len.toFixed(1)})`);
   if (lane.wrap) {
-    if (k !== key('alaska', 'kamchatka')) fail(`lane ${k} should not wrap`);
     if (lane.segments.length !== 2) fail(`wrap lane ${k} needs 2 segments`);
     const xs = lane.segments.flat().map((p) => p[0]);
     if (!(Math.min(...xs) <= 0.001 && Math.max(...xs) >= board.width - 0.001)) fail(`wrap lane ${k} must run off both edges`);
   } else if (lane.segments.length !== 1) fail(`lane ${k} should be one segment`);
   const first = lane.segments[0][0] as P, lastSeg = lane.segments[lane.segments.length - 1];
   const last = lastSeg[lastSeg.length - 1] as P;
-  const endOk = (coastDist(lane.a, first) < 0.3 && coastDist(lane.b, last) < 0.3) || (coastDist(lane.b, first) < 0.3 && coastDist(lane.a, last) < 0.3);
-  if (!endOk) fail(`lane ${k}: endpoints are not on the coasts of ${lane.a} and ${lane.b}`);
-  let foreign = 0;
+  // Shore points: the start sits on a's coast and the end on b's (the crossing's shore ticks go there).
+  if (!(coastDist(lane.a, first) < 0.3 && coastDist(lane.b, last) < 0.3)) fail(`lane ${k}: shore points are not on the coasts of ${lane.a} (start) and ${lane.b} (end)`);
+  if (lane.shore) {
+    const [sa, sb] = lane.shore;
+    if (Math.hypot(sa[0] - first[0], sa[1] - first[1]) > 1e-6 || Math.hypot(sb[0] - last[0], sb[1] - last[1]) > 1e-6) fail(`lane ${k}: shore points differ from the lane's ends`);
+  }
+  let foreign = 0, water = 0;
   const hits = new Set<string>();
   for (const seg of lane.segments)
     for (let i = 1; i < seg.length; i++) {
@@ -246,10 +331,12 @@ for (const lane of board.seaLanes) {
         const x = x0 + ((x1 - x0) * (s + 0.5)) / n, y = y0 + ((y1 - y0) * (s + 0.5)) / n;
         const hit = allLand(x, y, [lane.a, lane.b]);
         if (hit) (foreign += L / n), hits.add(hit);
+        else if (!allLand(x, y, [])) water += L / n;
       }
     }
   if (foreign > MAX_FOREIGN) fail(`lane ${k} crosses ${foreign.toFixed(2)} units of other land (${[...hits].join(', ')})`);
-  laneRows.push(`  ${k.padEnd(38)} ${len.toFixed(2).padStart(6)}${lane.wrap ? '  (wraps)' : ''}${foreign > 0 ? `  over land ${foreign.toFixed(2)}` : ''}`);
+  if (water / len < MIN_WATER) fail(`lane ${k}: only ${Math.round((100 * water) / len)}% of it is over open water (visible water = adjacency)`);
+  laneRows.push(`  ${k.padEnd(38)} ${len.toFixed(2).padStart(6)}  water ${String(Math.round((100 * water) / len)).padStart(3)}%${lane.wrap ? '  (wraps)' : ''}${foreign > 0 ? `  over land ${foreign.toFixed(2)}` : ''}`);
 }
 
 // continents / ocean labels sit on water
@@ -258,7 +345,9 @@ for (const [c, cg] of Object.entries(board.continents)) {
   const hit = allLand(x, y, []);
   if (hit) fail(`continent label ${c} sits on land (${hit})`);
 }
-if (Object.keys(board.continents).length !== 6) fail('expected 6 continent entries');
+const contIds = pack.rules.continents.map((c) => c.id);
+if (Object.keys(board.continents).length !== contIds.length || contIds.some((c) => !(c in board.continents)))
+  fail(`board continents (${Object.keys(board.continents).join(', ')}) ≠ rules.json (${contIds.join(', ')})`);
 for (const o of board.oceanLabels) if (allLand(o.at[0], o.at[1], [])) fail(`ocean label ${o.text} sits on land`);
 
 // ------------------------------------------------------------------ report
@@ -274,7 +363,8 @@ for (const k of laneSet) {
   nbrs.get(a)?.sea.push(b);
   nbrs.get(b)?.sea.push(a);
 }
-console.log(`\nboard ${board.width} × ${board.height}  ·  ${board.seaLanes.length} lanes  ·  ${board.decorativeLand.length} decorative polygons`);
+console.log(`\nmap ${id} (${pack.manifest.name})  ·  board.json sha256 ${sha.slice(0, 16)}…`);
+console.log(`board ${board.width} × ${board.height}  ·  ${board.seaLanes.length} lanes  ·  ${board.decorativeLand.length} decorative polygons`);
 console.log('territory              polys  verts   area  clear  land sea');
 let totalV = 0;
 for (const t of TERRITORY_IDS) {
@@ -285,23 +375,43 @@ for (const t of TERRITORY_IDS) {
   const c = clearance.get(t) ?? 0;
   const n = nbrs.get(t)!;
   console.log(
-    `${t.padEnd(22)} ${String(tg.polygons.length).padStart(5)} ${String(v).padStart(6)} ${tg.area.toFixed(1).padStart(6)} ${c.toFixed(2).padStart(6)}${c < MIN_CLEARANCE ? '!' : ' '} ${String(n.land.length).padStart(4)} ${String(n.sea.length).padStart(3)}  ${TERRITORIES[t].name}`,
+    `${t.padEnd(22)} ${String(tg.polygons.length).padStart(5)} ${String(v).padStart(6)} ${tg.area.toFixed(1).padStart(6)} ${c.toFixed(2).padStart(6)}${c < MIN_CLEARANCE ? (OVERHANG ? '~' : '!') : ' '} ${String(n.land.length).padStart(4)} ${String(n.sea.length).padStart(3)}  ${NAMES[t]}`,
   );
 }
 console.log(`total territory vertices: ${totalV}`);
-console.log(`land borders: ${terrLand.size}, sea lanes: ${laneSet.size}, Risk borders: ${borderSet.size}`);
+console.log(`closest neighbouring anchors: ${closestNeighbours[0]} ${closestNeighbours[1].toFixed(2)} apart (need ≥ ${MIN_NEIGHBOUR_ANCHOR})`);
+{
+  // Europe-style crowding report: each territory's room for a disc, measured to other territories' land.
+  const rows = TERRITORY_IDS.filter((t) => pack.continentOf[t] === 'europe').map((t) => {
+    const [x, y] = board.territories[t].anchor;
+    return `${t} ${foreignLandDist(t, x, y).toFixed(2)}`;
+  });
+  if (rows.length) console.log(`europe, anchor → nearest other land: ${rows.join(', ')}`);
+}
+if (overhangs.length) console.log(`armies overhanging water (${overhangs.length}): ${overhangs.join(', ')}`);
+console.log(`land borders: ${terrLand.size}, sea lanes: ${laneSet.size}, borders: ${borderSet.size}`);
 console.log('sea lanes (length in board units):');
 for (const r of laneRows) console.log(r);
 
 if (!process.argv.includes('--no-preview')) {
-  const files = await renderPreviews(board, resolve(ROOT, 'artifacts/map'), MIN_CLEARANCE);
-  console.log(`previews: ${files.join(', ')}`);
+  const recipePath = resolve(ROOT, 'scripts/map/packs', id, 'index.ts');
+  const recipe = existsSync(recipePath) ? ((await import(pathToFileURL(recipePath).href)) as { recipe: MapRecipe }).recipe : null;
+  const thumb = pack.manifest.thumbnail ? resolve(pack.dir, pack.manifest.thumbnail) : null;
+  const files = await renderPreviews(board, pack, {
+    outDir: resolve(ROOT, 'artifacts/map', id),
+    minClear: MIN_CLEARANCE,
+    shots: recipe?.previews ?? [],
+    project: recipe ? (lon, lat) => recipe.projection.forward(recipe.projection.unwrapLon(lon), lat) : undefined,
+    thumbPath: thumb && (process.argv.includes('--thumb') || !existsSync(thumb)) ? thumb : undefined,
+  });
+  console.log(`previews: ${files.map((f) => f.replace(ROOT + '/', '')).join(', ')}`);
 }
 
+for (const n of notes) console.log(`\n${n}`);
 if (failures.length) {
   console.log(`\nFAIL (${failures.length})`);
   for (const f of failures) console.log(`  ✗ ${f}`);
   process.exit(1);
 } else {
-  console.log('\nPASS: geometry valid, adjacency == BORDERS, anchors clear, lanes plausible');
+  console.log(`\nPASS ${id}: files well-formed, geometry valid, adjacency == topology.json, anchors clear, lanes over visible water`);
 }

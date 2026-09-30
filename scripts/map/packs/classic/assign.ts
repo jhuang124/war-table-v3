@@ -5,7 +5,7 @@
 //   pixel(l) — decided per pixel from its lon/lat (used to split big countries)
 // Lon values are unwrapped into the board window (-169.2 … 190.8), so Chukotka is > 180.
 
-import type { TerritoryId } from '../../src/engine/types';
+import type { TerritoryId } from '../../../../src/engine/types';
 
 /** 'ireland' = part of Great Britain, kept as a separate island. */
 export type Resolved = TerritoryId | 'decor' | 'drop' | 'ireland';
