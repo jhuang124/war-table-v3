@@ -146,11 +146,11 @@ for (const vp of [
       });
   });
   // v3: the army is a painted stone sized by its count (18 px for 1 army at 1440×900, never under the 14 px
-  // floor), its unit figure standing on it (≥ 14 px long: a sprite under that blurs), its numeral at the edge ≥ 11 px
+  // floor), its unit figure standing on it (≥ 14 px long: a sprite under that blurs), its numeral at the edge ≥ 14 px
   const minW = Math.min(...badges.map((b) => b.d));
   const minFig = Math.min(...badges.map((b) => b.fig));
   const minF = Math.min(...badges.map((b) => b.fs));
-  check(badges.length === 42 && minW >= 13.5 && minFig >= 14 && minF >= 11, `army pieces at home on 1280×800: ${badges.length} visible, stones ≥ ${minW.toFixed(1)} px across (≥ 14), figures ≥ ${minFig.toFixed(1)} px long (≥ 14), numerals ≥ ${minF.toFixed(1)} px (≥ 11)`, results);
+  check(badges.length === 42 && minW >= 13.5 && minFig >= 14 && minF >= 14, `army pieces at home on 1280×800: ${badges.length} visible, stones ≥ ${minW.toFixed(1)} px across (≥ 14), figures ≥ ${minFig.toFixed(1)} px long (≥ 14), numerals ≥ ${minF.toFixed(1)} px (≥ 14: a 9 px lining digit)`, results);
   const st0 = await page.evaluate(() => window.__risk.stats());
   check(st0.activeTweens === 0 && !st0.cameraMoving, `idle board: ${st0.activeTweens} tweens, camera ${st0.cameraMoving ? 'moving' : 'still'}`, results);
   await page.screenshot({ path: `${ART}/feel-home-1280x800.png` });

@@ -84,9 +84,16 @@ export function figDims(denom: Denom, d: number, k = FIG_K): [number, number] {
   const long = k * d;
   return denom === 2 ? [long, long / ASPECT[2]] : [long * ASPECT[denom], long];
 }
-/** The numeral's height (CSS px at the home view) on a stone `d` px across: small, never under 11 px × `s`. */
-export function numeralPxFor(d: number, s = 1): number {
-  return Math.min(14.5 * s, Math.max(11 * s, 0.3 * d + 5.5));
+/**
+ * The numeral's smallest size, CSS px (× the text size), set by the drawn digit, not the font size: Cormorant's
+ * lining digit is ~0.63 em, so 14 px draws a 9 px digit at 1440×900, the couch read (lead review 2026-09-30).
+ * A phone, held in the hand, keeps 11 px (a 7 px digit at DPR 3; TokenSystem.numMin, set per device by index.ts).
+ */
+export const NUMERAL_MIN = 14;
+export const NUMERAL_MIN_PHONE = 11;
+/** The numeral's height (CSS px at the home view) on a stone `d` px across: the floor, to ~17 on the largest stones. */
+export function numeralPxFor(d: number, s = 1, min = NUMERAL_MIN): number {
+  return Math.min(17 * s, Math.max(min * s, 0.4 * d + 3.6));
 }
 /** The DOM numeral's box for a font size (as overlay.ts lays it out): [w, h]. */
 export function numeralBox(fs: number, digits: number): [number, number] {
@@ -97,11 +104,11 @@ export type PxBox = [number, number, number, number];
  * The three parts of a piece at the home view, CSS px about its anchor (y down): the stone, the figure and
  * the numeral, for a count on a stone `d` across. The caps (index.ts fitCaps) and the table check use it.
  */
-export function pieceBoxes(n: number, d: number, s = 1, k = FIG_K, side = 1): { stone: PxBox; fig: PxBox; num: PxBox } {
+export function pieceBoxes(n: number, d: number, s = 1, k = FIG_K, side = 1, numMin = NUMERAL_MIN): { stone: PxBox; fig: PxBox; num: PxBox } {
   const R = d / 2;
   const [w, h] = figDims(denomOf(n), d, k);
   const feet = FEET * R;
-  const fs = numeralPxFor(d, s);
+  const fs = numeralPxFor(d, s, numMin);
   const [nw, nh] = numeralBox(fs, String(n).length);
   const cx = side * NUM_AT[0] * R;
   const cy = NUM_AT[1] * R;
@@ -112,19 +119,19 @@ const grow = (a: PxBox, b: PxBox): PxBox => [Math.min(a[0], b[0]), Math.min(a[1]
  * Count-independent: the union of a territory's piece parts over every count 1–99 when its stone is capped at
  * `cap` px (dmin/dmax: the 0 → 30 sizes, already × sizeScale). A cap that clears this clears every count.
  */
-export function pieceEnvelope(cap: number, dmin: number, dmax: number, s = 1, k = FIG_K, side = 1): { stone: PxBox; fig: PxBox; num: PxBox } {
+export function pieceEnvelope(cap: number, dmin: number, dmax: number, s = 1, k = FIG_K, side = 1, numMin = NUMERAL_MIN): { stone: PxBox; fig: PxBox; num: PxBox } {
   let out: { stone: PxBox; fig: PxBox; num: PxBox } | null = null;
   for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 99]) {
     const d = Math.min(stoneK(n, dmin, dmax), Math.max(dmin, cap));
-    const b = pieceBoxes(n, d, s, k, side);
+    const b = pieceBoxes(n, d, s, k, side, numMin);
     out = out ? { stone: grow(out.stone, b.stone), fig: grow(out.fig, b.fig), num: grow(out.num, b.num) } : b;
   }
   return out!;
 }
 const MAX_TRAVELERS = 8;
-const STONE_CAP = TERRITORY_IDS.length * 2 + MAX_TRAVELERS;
-const FIG_CAP = TERRITORY_IDS.length + MAX_TRAVELERS;
-const BLOT_CAP = TERRITORY_IDS.length + MAX_TRAVELERS;
+const STONE_CAP = TERRITORY_IDS.length * 2;
+const FIG_CAP = TERRITORY_IDS.length * 2;
+const BLOT_CAP = TERRITORY_IDS.length;
 const IVORY_RGB = hexToRgb(IVORY);
 
 export interface TokenTraveler {
@@ -532,9 +539,13 @@ function lacquer(tile: RGB): RGB {
 
 export class TokenSystem {
   group = new THREE.Group();
+  // The layer being written: the resting pieces, then the travellers (their own meshes, drawn over the attack
+  // stroke and the fortify route, fx.ts renderOrder 20, so a moving stone and figure are never under the ink).
   private stones: Instanced;
   private figs: Instanced;
   private blots: Instanced;
+  private rest: { stones: Instanced; figs: Instanced; blots: Instanced };
+  private trav: { stones: Instanced; figs: Instanced; blots: Instanced };
   private stoneMat: THREE.ShaderMaterial;
   private figMat: THREE.ShaderMaterial;
   private blotMat: THREE.ShaderMaterial;
@@ -560,6 +571,8 @@ export class TokenSystem {
    */
   dminPx = 14;
   dmaxPx = 36;
+  /** The numeral's smallest size at home, CSS px (13; phones 11). */
+  numMin = NUMERAL_MIN;
   pxUnit = 1 / 12.7;
   /** Kept for callers of the old stack API: the disc size fields. */
   discPx = 36;
@@ -630,17 +643,29 @@ export class TokenSystem {
         this.dirty = true;
       });
     const flat = new THREE.PlaneGeometry(1, 1);
-    this.stones = new Instanced(flat, { iPos: 3, iSize: 4, iCol: 4, iDeep: 3, iFx: 4 }, STONE_CAP, this.stoneMat);
+    const stoneSpec = { iPos: 3, iSize: 4, iCol: 4, iDeep: 3, iFx: 4 };
+    const figSpec = { iPos: 3, iSize: 2, iUV: 4, iA: 4, iB: 4, iC: 4, iOff: 2 };
+    const blotSpec = { iPos: 3, iR: 3, iCol: 4, iK: 2 };
+    this.stones = new Instanced(flat, stoneSpec, STONE_CAP, this.stoneMat);
     const quad = new THREE.PlaneGeometry(1, 1);
     quad.translate(0, 0.5, 0);
-    this.figs = new Instanced(quad, { iPos: 3, iSize: 2, iUV: 4, iA: 4, iB: 4, iC: 4, iOff: 2 }, FIG_CAP, this.figMat);
+    this.figs = new Instanced(quad, figSpec, FIG_CAP, this.figMat);
     const blotQuad = new THREE.PlaneGeometry(1, 1);
-    this.blots = new Instanced(blotQuad, { iPos: 3, iR: 3, iCol: 4, iK: 2 }, BLOT_CAP, this.blotMat);
+    this.blots = new Instanced(blotQuad, blotSpec, BLOT_CAP, this.blotMat);
     // the feet's shadow lies on the stone, the figure over both
     this.stones.mesh.renderOrder = 9;
     this.blots.mesh.renderOrder = 9.5;
     this.figs.mesh.renderOrder = 10;
-    this.group.add(this.blots.mesh, this.stones.mesh, this.figs.mesh);
+    this.rest = { stones: this.stones, figs: this.figs, blots: this.blots };
+    this.trav = {
+      stones: new Instanced(flat, stoneSpec, MAX_TRAVELERS, this.stoneMat),
+      figs: new Instanced(quad, figSpec, MAX_TRAVELERS, this.figMat),
+      blots: new Instanced(blotQuad, blotSpec, MAX_TRAVELERS, this.blotMat),
+    };
+    this.trav.stones.mesh.renderOrder = 21;
+    this.trav.blots.mesh.renderOrder = 21.5;
+    this.trav.figs.mesh.renderOrder = 22;
+    this.group.add(this.blots.mesh, this.stones.mesh, this.figs.mesh, this.trav.blots.mesh, this.trav.stones.mesh, this.trav.figs.mesh);
 
     this.ready = new Promise<void>((resolve) => {
       const base = (import.meta.env?.BASE_URL as string | undefined) ?? './';
@@ -847,7 +872,7 @@ export class TokenSystem {
    */
   extentPoints(_pitchDeg: number, _plaqueUnits: number, _denom: Denom | null = null, _ringUnits = 0): number[][] {
     const s = this.sizeScale;
-    const [st, fg, nm] = ((e) => [e.stone, e.fig, e.num])(pieceEnvelope(this.dmaxPx * s, this.dminPx * s, this.dmaxPx * s, s));
+    const [st, fg, nm] = ((e) => [e.stone, e.fig, e.num])(pieceEnvelope(this.dmaxPx * s, this.dminPx * s, this.dmaxPx * s, s, FIG_K, 1, this.numMin));
     const u = this.pxUnit;
     const top = -fg[1] * u;
     const west = -Math.min(st[0], fg[0]) * u;
@@ -1342,7 +1367,7 @@ export class TokenSystem {
       const Rs = t.shown > 0 ? Math.max(R, Rn * 0.5) : R;
       t.halfW = Rs;
       this.numAt(this.p, Rs, t.figTop, this.numSide.get(t.id) ?? 1);
-      t.numH = numeralPxFor((2 * Rn) / px, ss) * px;
+      t.numH = numeralPxFor((2 * Rn) / px, ss, this.numMin) * px;
       const dim = tile.dim;
       const ghost = t.preview !== null && t.preview !== t.shown && t.preview > 0 ? t.preview : 0;
       if (R > 0 && t.alpha > 0.002) this.writeStone(this.p, R, colors.col, colors.deep, t.alpha, { seed: t.seed, dry: t.dry, soak: t.soak, dim });
@@ -1370,6 +1395,7 @@ export class TokenSystem {
         this.writeFig(this.p, t.denom, 2 * R, a, t.reveal, smoke, 0, t.lean, t.flip, 0, t.seed, colors.deep, dim, t.figOffX, t.figOffY - FEET * R, fk);
       }
     }
+    this.layer(this.trav);
     for (const tr of this.movers) {
       const pts = tr.pts;
       const Lt = tr.cum[tr.cum.length - 1] || 1;
@@ -1384,7 +1410,7 @@ export class TokenSystem {
       tr.plaque.copy(this.p);
       tr.halfW = this.radiusFor(tr.n, tr.to);
       this.numAt(this.p, tr.halfW, tr.figTop, this.numSide.get(tr.to) ?? 1);
-      tr.numH = numeralPxFor((2 * tr.halfW) / px, ss) * px;
+      tr.numH = numeralPxFor((2 * tr.halfW) / px, ss, this.numMin) * px;
       const fadeIn = Math.min(1, tr.t * 10);
       // the stone and its figure travel together
       const R = tr.halfW;
@@ -1394,15 +1420,25 @@ export class TokenSystem {
       this.writeFeet(this.p, R, fw, tr.deep, 0.42 * fadeIn, tr.seed);
       this.writeFig(this.p, tr.denom, 2 * R, fadeIn * (tr.denom === 0 ? SOLDIER_ALPHA : 1), 1, 0, 0, 0, tr.flip, 0, tr.seed, tr.deep, 0, 0, -FEET * R, tk);
     }
-    this.blots.commit();
-    this.stones.commit();
-    this.figs.commit();
+    for (const L of [this.rest, this.trav]) {
+      L.blots.commit();
+      L.stones.commit();
+      L.figs.commit();
+    }
+    this.layer(this.rest);
+  }
+  private layer(L: { stones: Instanced; figs: Instanced; blots: Instanced }): void {
+    this.stones = L.stones;
+    this.figs = L.figs;
+    this.blots = L.blots;
   }
 
   dispose(): void {
-    this.stones.dispose();
-    this.figs.dispose();
-    this.blots.dispose();
+    for (const L of [this.rest, this.trav]) {
+      L.stones.dispose();
+      L.figs.dispose();
+      L.blots.dispose();
+    }
     this.atlas?.dispose();
     for (const m of this.materials) m.dispose();
   }
