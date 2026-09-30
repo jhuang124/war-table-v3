@@ -12,7 +12,7 @@ import { TERRITORY_IDS, TERRITORIES } from '../engine/mapData';
 import type { PlayerPalette } from '../shared/palette';
 import type { BoardGeometry } from '../map/types';
 import type { TileSet } from './tiles';
-import { DISC_E, type TokenSystem } from './tokens';
+import { numeralBox, type TokenSystem } from './tokens';
 import { hexToRgb } from './util';
 import { Animator, ease } from './anim';
 
@@ -27,7 +27,7 @@ const CSS = `
 .rb-badge.dim{opacity:.8}
 .rb-badge.ghosted{z-index:2}
 .rb-ghost{position:absolute;left:calc(100% + 2px);top:50%;transform:translateY(-54%);color:#f2ede2;
-  font:600 calc(18px * var(--ui))/1 ${SERIF};font-variant-numeric:lining-nums tabular-nums;letter-spacing:0;display:none}
+  font:600 max(1em, calc(13px * var(--ui)))/1 ${SERIF};font-variant-numeric:lining-nums tabular-nums;letter-spacing:0;display:none}
 .rb-ghost.at-left{left:auto;right:calc(100% + 2px)}
 .rb-loss{position:absolute;left:0;top:0;color:#f2ede2;font:600 calc(18px * var(--ui))/1 ${SERIF};font-variant-numeric:lining-nums tabular-nums;
   will-change:transform,opacity;white-space:nowrap}
@@ -79,8 +79,10 @@ interface Badge {
   py: number;
   ph: number;
   pw: number;
-  /** The whole piece's screen box (figure and ring), container px. */
+  /** The whole piece's screen box (stone, figure and numeral), container px. */
   box: [number, number, number, number];
+  /** The stone and figure only (no numeral), container px. */
+  fig: [number, number, number, number];
   lastW: number;
   lastDigits: number;
   onScreen: boolean;
@@ -146,7 +148,9 @@ export class Overlay {
   relax = false;
   private pos = new Float64Array(TERRITORY_IDS.length * 6);
   private off = new Float64Array(TERRITORY_IDS.length * 2);
-  private hw = new Float64Array(TERRITORY_IDS.length);
+  /** Per piece this frame: the numeral's font px, and the piece's box (stone + figure), container px. */
+  private fsz = new Float64Array(TERRITORY_IDS.length);
+  private ext = new Float64Array(TERRITORY_IDS.length * 4);
   private labelsDirty = true;
   /** Names need a re-layout (the board's render-on-demand loop asks). */
   get dirty(): boolean {
@@ -232,6 +236,7 @@ export class Overlay {
         ph: 22,
         pw: 22,
         box: [0, 0, 0, 0],
+        fig: [0, 0, 0, 0],
         lastW: 0,
         lastDigits: 0,
         onScreen: false,
@@ -521,14 +526,12 @@ export class Overlay {
     return Math.max(this.minPlaque * soft, Math.min(38 * soft, figH * 0.74));
   }
   /**
-   * The numeral's size on a top face `h` × `w` px (the inlay is 70 % of it): as large as the inlay allows,
-   * never under 11 px (PLAN §1: the close read stays legible on phones) × the text size.
+   * The numeral's font size from its height on screen (tokens.numeralSize, projected): small, at the stone's
+   * edge, never under 11 px (PLAN §1: the close read stays legible on phones) × the text size.
    */
-  private numeralPx(h: number, w: number, digits: number): number {
+  private numeralPx(h: number): number {
     const soft = 1 + (this._ui - 1) * 0.8;
-    const byH = h * 0.92;
-    const byW = (w * 0.7) / (digits >= 3 ? 1.5 : digits === 2 ? 1.05 : 0.62);
-    return Math.max(11 * soft, Math.min(byH, byW, 22 * soft));
+    return Math.max(11 * soft, Math.min(h, 22 * soft));
   }
   /** A disc's diameter on screen (px) at a base point, from its world radius. */
   private discPx(base: THREE.Vector3, r: number, camera: THREE.Camera): number {
@@ -581,10 +584,20 @@ export class Overlay {
       const feet = this.tokens.top(b.id);
       const top = this.tokens.figTop(b.id);
       const [x, y, , z] = this.figure(feet, top, camera);
-      // the numeral sits on the top face: its centre, the disc's width and the face's height on screen
+      // the numeral: small ivory at the stone's lower-right edge (tokens.figTop), its size from the home view's
       const [tx, ty] = this.proj(top, camera);
-      const dpx = this.discPx(feet, this.tokens.halfWidth(b.id), camera);
-      const ph = dpx * DISC_E;
+      const upx = this.discPx(feet, 0.5, camera);
+      const dpx = this.tokens.halfWidth(b.id) * 2 * upx;
+      const fs = this.numeralPx(this.tokens.numeralSize(b.id) * upx);
+      const [pw0, ph] = numeralBox(fs, String(Math.max(0, b.shown)).length);
+      // the piece: the stone and the figure standing on it
+      const e = this.tokens.pieceExtent(b.id);
+      const eo = i * 4;
+      this.ext[eo] = x - e[0] * upx;
+      this.ext[eo + 1] = y - e[1] * upx;
+      this.ext[eo + 2] = x + e[2] * upx;
+      this.ext[eo + 3] = y + e[3] * upx;
+      this.fsz[i] = fs;
       b.cx = x;
       b.cy = y;
       b.diam = dpx;
@@ -594,11 +607,10 @@ export class Overlay {
       const o = i * 6;
       P[o] = tx;
       P[o + 1] = ty;
-      P[o + 2] = dpx;
+      P[o + 2] = pw0;
       P[o + 3] = ph;
-      P[o + 4] = ty - ph / 2;
+      P[o + 4] = Math.min(ty - ph / 2, this.ext[eo + 1]);
       P[o + 5] = b.visible && b.onScreen && this.tokens.visual(b.id) >= 0.05 ? 1 : 0;
-      this.hw[i] = dpx / 2;
     }
     // (Numerals are painted on their stacks: they never move off them, so the phone nudge is off.)
     for (let i = 0; i < n; i++) {
@@ -609,16 +621,16 @@ export class Overlay {
       const pw = P[o + 2];
       const ph = P[o + 3];
       const fy = P[o + 4];
-      const x = b.cx;
       const digits = String(Math.max(0, b.shown)).length;
       if (Math.abs(px - b.px) > 0.25 || Math.abs(py - b.py) > 0.25 || Math.abs(fy - b.box[1]) > 0.25) moved = true;
       b.px = px;
       b.py = py;
       b.ph = ph;
       b.pw = pw;
-      const hw = this.hw[i];
-      // The piece: the stack, from its top face to the front of its base disc.
-      b.box = [x - hw, fy, x + hw, b.cy + ph / 2];
+      const eo = i * 4;
+      // The piece: the stone, the figure standing on it, and its numeral at the edge.
+      b.box = [Math.min(this.ext[eo], px - pw / 2), fy, Math.max(this.ext[eo + 2], px + pw / 2), Math.max(this.ext[eo + 3], py + ph / 2)];
+      b.fig = [this.ext[eo], this.ext[eo + 1], this.ext[eo + 2], this.ext[eo + 3]];
       if (!b.visible) {
         if (b.hideAt && now >= b.hideAt) {
           b.hideAt = 0;
@@ -646,7 +658,7 @@ export class Overlay {
         b.lastD = hq;
         b.lastW = wq;
         b.lastDigits = digits;
-        const fs = this.numeralPx(hq, wq, digits);
+        const fs = this.fsz[i];
         b.el.style.width = `${wq}px`;
         b.el.style.height = `${hq}px`;
         b.el.style.fontSize = `${Math.round(fs * 2) / 2}px`;
@@ -731,15 +743,16 @@ export class Overlay {
       // the walking stack's numeral rides on its top face
       this.right.setFromMatrixColumn(camera.matrixWorld, 0);
       const [x, y] = this.proj(tr.figTop, camera);
-      const dpx = this.discPx(tr.top, tr.halfW, camera);
-      const h = Math.round(dpx * DISC_E * 2) / 2;
+      const fs = this.numeralPx(tr.numH * this.discPx(tr.top, 0.5, camera));
       const digits = String(tr.n).length;
-      const w = Math.round(dpx * 2) / 2;
+      const [bw, bh] = numeralBox(fs, digits);
+      const h = Math.round(bh * 2) / 2;
+      const w = Math.round(bw * 2) / 2;
       if (h !== e.lastD) {
         e.lastD = h;
         e.el.style.width = `${w}px`;
         e.el.style.height = `${h}px`;
-        e.el.style.fontSize = `${Math.round(this.numeralPx(h, w, digits) * 2) / 2}px`;
+        e.el.style.fontSize = `${Math.round(fs * 2) / 2}px`;
       }
       const t = `translate3d(${snap(x - w / 2, r)}px,${snap(y - h / 2, r)}px,0)`;
       if (t !== e.lastT || e.el.style.visibility !== 'visible') {
@@ -956,11 +969,11 @@ export class Overlay {
     }
   }
 
-  /** A piece's screen box (figure top → plaque bottom) and its count plaque, container px; null if hidden. */
-  pieceRects(id: TerritoryId): { box: [number, number, number, number]; plaque: [number, number, number, number] } | null {
+  /** A piece's screen box (figure top → stone or numeral bottom), its numeral, and its stone + figure alone; container px; null if hidden. */
+  pieceRects(id: TerritoryId): { box: [number, number, number, number]; plaque: [number, number, number, number]; fig: [number, number, number, number] } | null {
     const b = this.badgeList.find((x) => x.id === id);
     if (!b || !b.visible || !b.onScreen) return null;
-    return { box: [b.box[0], b.box[1], b.box[2], b.box[3]], plaque: [b.px - b.pw / 2, b.py - b.ph / 2, b.px + b.pw / 2, b.py + b.ph / 2] };
+    return { box: [b.box[0], b.box[1], b.box[2], b.box[3]], plaque: [b.px - b.pw / 2, b.py - b.ph / 2, b.px + b.pw / 2, b.py + b.ph / 2], fig: [b.fig[0], b.fig[1], b.fig[2], b.fig[3]] };
   }
 
   get chipCount(): number {

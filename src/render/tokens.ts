@@ -7,16 +7,28 @@
 //
 // Size is strength, area-linear: d = dmin + (dmax − dmin) · √(min(n, 30) / 30) (14 → 36 px at the 1440 home;
 // the board scales the pair per device). Each territory has a cap (set from the home view by index.ts) so a
-// stone never crosses another territory's land nor covers another territory's numeral. The numeral is DOM
-// (overlay.ts), centred on the stone.
+// stone never crosses another territory's land, and its figure and numeral never cover another territory's
+// figure or numeral (pieceEnvelope below is the box the caps are fitted with).
+//
+// The piece (John 2026-09-30, "Bring the icons back"; SOUL touchstone units-place.png: the pale ivory brush
+// figure on an owner-coloured blot — the stone is the blot): the unit figure STANDS ON the stone, centred,
+// scaled to it. Soldier 1–4 armies, rider 5–9, cannon 10+, from the ivory brush atlas (dark strokes in the
+// seat's deep ink, light in ivory). Its long side is FIG_K × the stone's diameter (a 1-army soldier on the
+// 18 px stone is ~20 px tall at 1440×900; a cannon on a 36 px stone ~40 px across); its feet sit FEET × the
+// radius below the centre, on a small darker-wash shadow that runs into the stone's own lower-right shadow.
+// Flat, unlit, the same hand as the coasts. The numeral is DOM (overlay.ts): small ivory, at the stone's
+// lower-right edge (figTop() is its point, numeralSize() its height), never on the figure.
 //
 // Motion (the same beats as before; Pillar 5):
-//   place       the stone swells as the wash soaks in (≤ 200 ms); the wood click lands as it starts
-//   loss        it shrinks a step inside the verdict (the fight figure puffs its ink smoke)
-//   empty       at 0 it dries back to paper (320 ms); the seat's last stone (an elimination) over ~1.2 s
-//   traveller   a stone slides along the stroke (or the fortify route) and settles
-//   preview     a ghost stone at the size a count would leave (occupy / fortify / a staged placement)
-// Figures (the ivory brush soldiers, the same medium) stand only on the two fighting territories.
+//   place       the stone swells as the wash soaks in (≤ 200 ms), the figure swelling with it (on a new stone it
+//               fades up as the stone grows); the wood click lands as it starts
+//   band        4→5, 9→10 (and back): the old figure dissolves and the new one inks in from the feet, 160 ms
+//   loss        the figure puffs ink smoke, then the stone shrinks a step (inside the verdict)
+//   empty       at 0 the figure goes to smoke and the stone dries back to paper (320 ms; a seat's last ~1.2 s)
+//   traveller   a stone and its figure slide together along the stroke (or the fortify route) and settle
+//   preview     a ghost stone at the size a count would leave (occupy / fortify / staged); if that count is in
+//               another band (or the stone is empty), the figure it would be stands as a ghost in the real one's place
+// In a fight the two figures turn to face each other, the attacker leans in, a hit knocks one back.
 import * as THREE from 'three';
 import type { TerritoryId } from '../engine/types';
 import { TERRITORY_IDS } from '../engine/mapData';
@@ -26,7 +38,7 @@ import { deepOf, type TileSet } from './tiles';
 import { loadTexmap } from './texmaps';
 import ATLAS from './unitsAtlas.json';
 
-/** 0 = infantry (1–4), 1 = cavalry (5–9), 2 = artillery (10+): the fight figures only. */
+/** 0 = infantry (1–4), 1 = cavalry (5–9), 2 = artillery (10+): the figure standing on the stone. */
 export type Denom = 0 | 1 | 2;
 export const denomOf = (n: number): Denom => (n >= 10 ? 2 : n >= 5 ? 1 : 0);
 export const DENOM_NAMES = ['infantry', 'cavalry', 'artillery'] as const;
@@ -51,10 +63,64 @@ export function discsOf(n: number): { thick: number; thin: number } {
   return { thick: Math.floor(n / 5), thin: n % 5 };
 }
 
-/** Fight figure height per denomination (board units at size scale 1). */
+/** Kept for callers of the old API: the free-standing fight figure heights (board units). */
 const FIG_H = [3.45, 3.3, 1.9];
 const SPRITES = [ATLAS.sprites.soldier, ATLAS.sprites.rider, ATLAS.sprites.cannon];
 const ASPECT = SPRITES.map((s) => s.w / s.h);
+
+// --- the figure on the stone (units of the stone's diameter / radius) -------------------------------------
+/** The figure's long side (height for the soldier and rider, width for the cannon) ÷ the stone's diameter. */
+export const FIG_K = 1.1;
+/** The figure's feet, below the stone's centre, × its radius. */
+export const FEET = 0.4;
+/** The numeral's centre from the stone's centre, × its radius: right, and down (the lower-right edge). */
+export const NUM_AT: readonly [number, number] = [0.98, 0.8];
+/** The small soldier's opacity (the squint guard's lever: thinner than a rider, never a smaller stone). */
+export const SOLDIER_ALPHA = 0.85;
+/** The smallest figure a crowded layout may draw (× the stone's diameter), after the stone is at its floor. */
+export const FIG_K_MIN = 0.7;
+/** The figure's width and height for a stone `d` across (any unit); `k` = its long side ÷ d. */
+export function figDims(denom: Denom, d: number, k = FIG_K): [number, number] {
+  const long = k * d;
+  return denom === 2 ? [long, long / ASPECT[2]] : [long * ASPECT[denom], long];
+}
+/** The numeral's height (CSS px at the home view) on a stone `d` px across: small, never under 11 px × `s`. */
+export function numeralPxFor(d: number, s = 1): number {
+  return Math.min(14.5 * s, Math.max(11 * s, 0.3 * d + 5.5));
+}
+/** The DOM numeral's box for a font size (as overlay.ts lays it out): [w, h]. */
+export function numeralBox(fs: number, digits: number): [number, number] {
+  return [fs * (0.52 * digits + 0.14), fs * 0.95];
+}
+export type PxBox = [number, number, number, number];
+/**
+ * The three parts of a piece at the home view, CSS px about its anchor (y down): the stone, the figure and
+ * the numeral, for a count on a stone `d` across. The caps (index.ts fitCaps) and the table check use it.
+ */
+export function pieceBoxes(n: number, d: number, s = 1, k = FIG_K, side = 1): { stone: PxBox; fig: PxBox; num: PxBox } {
+  const R = d / 2;
+  const [w, h] = figDims(denomOf(n), d, k);
+  const feet = FEET * R;
+  const fs = numeralPxFor(d, s);
+  const [nw, nh] = numeralBox(fs, String(n).length);
+  const cx = side * NUM_AT[0] * R;
+  const cy = NUM_AT[1] * R;
+  return { stone: [-R, -R, R, R], fig: [-w / 2, feet - h, w / 2, feet], num: [cx - nw / 2, cy - nh / 2, cx + nw / 2, cy + nh / 2] };
+}
+const grow = (a: PxBox, b: PxBox): PxBox => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+/**
+ * Count-independent: the union of a territory's piece parts over every count 1–99 when its stone is capped at
+ * `cap` px (dmin/dmax: the 0 → 30 sizes, already × sizeScale). A cap that clears this clears every count.
+ */
+export function pieceEnvelope(cap: number, dmin: number, dmax: number, s = 1, k = FIG_K, side = 1): { stone: PxBox; fig: PxBox; num: PxBox } {
+  let out: { stone: PxBox; fig: PxBox; num: PxBox } | null = null;
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 99]) {
+    const d = Math.min(stoneK(n, dmin, dmax), Math.max(dmin, cap));
+    const b = pieceBoxes(n, d, s, k, side);
+    out = out ? { stone: grow(out.stone, b.stone), fig: grow(out.fig, b.fig), num: grow(out.num, b.num) } : b;
+  }
+  return out!;
+}
 const MAX_TRAVELERS = 8;
 const STONE_CAP = TERRITORY_IDS.length * 2 + MAX_TRAVELERS;
 const FIG_CAP = TERRITORY_IDS.length + MAX_TRAVELERS;
@@ -69,10 +135,12 @@ export interface TokenTraveler {
   /** World position of the traveller's centre on the paper (updated every frame while it slides). */
   top: THREE.Vector3;
   plaque: THREE.Vector3;
-  /** Its numeral's point (the centre again). */
+  /** Its numeral's point (the stone's lower-right edge). */
   figTop: THREE.Vector3;
   /** The stone's radius, world units. */
   halfW: number;
+  /** The numeral's height at the home view, world units (the overlay scales it with the zoom). */
+  numH: number;
   /** The mover's palette id. */
   owner: string;
   denom: Denom;
@@ -97,7 +165,8 @@ interface Tok {
   soak: number;
   /** Ghost total (preview), or null. */
   preview: number | null;
-  // --- the fight figure (only while this territory fights)
+  // --- the figure on the stone
+  /** Presence 0..1 (1 whenever the stone stands; 0 once it has gone to smoke). */
   fig: number;
   denom: Denom;
   reveal: number;
@@ -115,11 +184,18 @@ interface Tok {
   /** World centre of the stone, refreshed by update(). */
   top: THREE.Vector3;
   plaque: THREE.Vector3;
+  /** The numeral's point: the stone's lower-right edge. */
   figTop: THREE.Vector3;
   halfW: number;
+  /** The numeral's height at home, world units. */
+  numH: number;
+  /** The piece's extent about its centre, world units in screen directions: left, up, right, down. */
+  ext: [number, number, number, number];
 }
 
 interface Traveler extends TokenTraveler {
+  /** Where it's going (its stone takes that territory's cap). */
+  to: TerritoryId;
   col: RGB;
   deep: RGB;
   pts: THREE.Vector3[];
@@ -296,7 +372,8 @@ void main() {
   if (a < 0.02) discard;
   vec3 rgb = tex.rgb / max(a, 0.001);
   float L = dot(rgb, vec3(0.299, 0.587, 0.114));
-  float k = smoothstep(0.2, 0.8, L);
+  // pale ivory figures with the ink only in the drawing's darkest strokes (the touchstone's, not a dark silhouette)
+  float k = smoothstep(0.06, 0.42, L);
   vec3 deep = vC.rgb * 0.38 + vec3(0.012, 0.016, 0.03);
   vec3 ivory = uIvory * (1.0 + 0.07 * vB.z);
   deep *= 1.0 - 0.35 * vB.z;
@@ -462,7 +539,7 @@ export class TokenSystem {
   private figMat: THREE.ShaderMaterial;
   private blotMat: THREE.ShaderMaterial;
   private atlas: THREE.Texture | null = null;
-  /** Resolves once the fight figures' sprite atlas has loaded. */
+  /** Resolves once the figures' sprite atlas has loaded. */
   ready: Promise<void>;
   readonly figH = FIG_H;
   readonly figHalfW = FIG_H.map((h, i) => (h * ASPECT[i]) / 2);
@@ -473,7 +550,7 @@ export class TokenSystem {
   materials: THREE.Material[] = [];
   /** Size multiplier from the UI text size. */
   sizeScale = 1;
-  /** Phones: the fight figures a little larger than their share of the map. */
+  /** Kept for callers of the old API (the free-standing fight figures' phone boost; unused by the figures on stones). */
   figBoost = 1;
   /** Reduced motion: counts change in place — stones fade, nothing swells, slides or dries in patches. */
   reduced = false;
@@ -492,10 +569,16 @@ export class TokenSystem {
   private right = new THREE.Vector3(1, 0, 0);
   private up = new THREE.Vector3(0, 0.1, -0.99);
   private p = new THREE.Vector3();
+  private q = new THREE.Vector3();
+  /** The view's up, laid flat on the paper (unit): "north" on screen. */
+  private upG = new THREE.Vector3(0, 0, -1);
   private last = new Float32Array(0);
   private fight = new Set<TerritoryId>();
   /** Per-territory caps on the diameter, CSS px at the home view (index.ts fitCaps). */
   private caps = new Map<TerritoryId, number>();
+  private figK = new Map<TerritoryId, number>();
+  /** −1: the numeral sits at the stone's lower-LEFT edge (a crowded neighbour to the lower right). */
+  private numSide = new Map<TerritoryId, number>();
   /** Called as a placed army's wash first touches the stone (the wood click). */
   onContact: ((id: TerritoryId) => void) | null = null;
 
@@ -553,8 +636,9 @@ export class TokenSystem {
     this.figs = new Instanced(quad, { iPos: 3, iSize: 2, iUV: 4, iA: 4, iB: 4, iC: 4, iOff: 2 }, FIG_CAP, this.figMat);
     const blotQuad = new THREE.PlaneGeometry(1, 1);
     this.blots = new Instanced(blotQuad, { iPos: 3, iR: 3, iCol: 4, iK: 2 }, BLOT_CAP, this.blotMat);
-    this.blots.mesh.renderOrder = 8;
+    // the feet's shadow lies on the stone, the figure over both
     this.stones.mesh.renderOrder = 9;
+    this.blots.mesh.renderOrder = 9.5;
     this.figs.mesh.renderOrder = 10;
     this.group.add(this.blots.mesh, this.stones.mesh, this.figs.mesh);
 
@@ -615,6 +699,8 @@ export class TokenSystem {
         plaque: a.clone(),
         figTop: a.clone(),
         halfW: TOKEN_R,
+        numH: 1,
+        ext: [0, 0, 0, 0],
       };
       this.toks.set(id, t);
       this.list.push(t);
@@ -639,15 +725,19 @@ export class TokenSystem {
   get radius(): number {
     return (this.dmaxPx * this.sizeScale * this.pxUnit) / 2;
   }
-  setCaps(caps: Map<TerritoryId, number>): void {
+  /** The caps, and (crowded layouts) the figures drawn smaller than FIG_K once a stone is at its floor. */
+  setCaps(caps: Map<TerritoryId, number>, figK?: Map<TerritoryId, number>, numSide?: Map<TerritoryId, number>): void {
     this.caps = caps;
+    this.figK = figK ?? new Map();
+    this.numSide = numSide ?? new Map();
     this.dirty = true;
+  }
+  /** This territory's figure size, × its stone's diameter. */
+  figKOf(id?: TerritoryId): number {
+    return (id && this.figK.get(id)) || FIG_K;
   }
   capOf(id?: TerritoryId): number {
     return id ? (this.caps.get(id) ?? this.dmaxPx * this.sizeScale) : this.dmaxPx * this.sizeScale;
-  }
-  private get figScale(): number {
-    return this.sizeScale * this.figBoost;
   }
 
   get travelers(): readonly TokenTraveler[] {
@@ -671,6 +761,7 @@ export class TokenSystem {
     const pr = (pitchDeg * Math.PI) / 180;
     this.right.set(Math.cos(az), 0, -Math.sin(az));
     this.up.set(-Math.sin(az) * Math.sin(pr), Math.cos(pr), -Math.cos(az) * Math.sin(pr));
+    this.upG.set(this.up.x, 0, this.up.z).normalize();
     this.dirty = true;
   }
 
@@ -702,9 +793,17 @@ export class TokenSystem {
   plaquePoint(id: TerritoryId): THREE.Vector3 {
     return this.toks.get(id)!.plaque;
   }
-  /** The stone's centre (world): where its numeral sits. */
+  /** The numeral's point (world): the stone's lower-right edge. */
   figTop(id: TerritoryId): THREE.Vector3 {
     return this.toks.get(id)!.figTop;
+  }
+  /** The numeral's height at the home view, world units (the overlay scales it with the zoom, ≥ 11 px). */
+  numeralSize(id: TerritoryId): number {
+    return this.toks.get(id)!.numH;
+  }
+  /** The piece (stone + figure) about its centre, world units in screen directions: [left, up, right, down]. */
+  pieceExtent(id: TerritoryId): readonly [number, number, number, number] {
+    return this.toks.get(id)!.ext;
   }
   /** The stone's radius (world), as drawn now. */
   halfWidth(id: TerritoryId): number {
@@ -720,9 +819,11 @@ export class TokenSystem {
     return this.toks.get(id)!.shown;
   }
   /** Test hook: the stone a territory is drawn with (its count, diameter at home, cap). */
-  stoneOf(id: TerritoryId): { n: number; dPx: number; capPx: number; alpha: number } {
+  stoneOf(id: TerritoryId): { n: number; dPx: number; capPx: number; alpha: number; denom: Denom; fig: number; figWPx: number; figHPx: number } {
     const t = this.toks.get(id)!;
-    return { n: t.shown, dPx: this.diamPx(t.shown, id), capPx: this.capOf(id), alpha: t.alpha };
+    const d = this.diamPx(t.shown, id);
+    const [w, h] = figDims(denomOf(t.shown), d, this.figKOf(id));
+    return { n: t.shown, dPx: d, capPx: this.capOf(id), alpha: t.alpha, denom: t.denom, fig: t.fig, figWPx: t.shown > 0 ? w : 0, figHPx: t.shown > 0 ? h : 0 };
   }
   /** Kept for the old test hook name. */
   stackOf(id: TerritoryId): { n: number; thick: number; thin: number; alpha: number; heightPx: number } {
@@ -739,14 +840,24 @@ export class TokenSystem {
     return out.set(tile.anchorW.x, tile.pivot.position.y + TILE_TOP, tile.anchorW.z);
   }
 
-  /** World points bounding every piece at the home camera, four per piece: north, west, east, south of a full stone. */
+  /**
+   * World points bounding every piece at the home camera, four per piece (the figure's top first, camera.ts):
+   * the tallest figure's head, the widest part's west and east, and the lowest of the stone and numeral — the
+   * envelope over every count of an uncapped stone (pieceEnvelope), so the home view never moves with a count.
+   */
   extentPoints(_pitchDeg: number, _plaqueUnits: number, _denom: Denom | null = null, _ringUnits = 0): number[][] {
-    const R = this.radius;
+    const s = this.sizeScale;
+    const [st, fg, nm] = ((e) => [e.stone, e.fig, e.num])(pieceEnvelope(this.dmaxPx * s, this.dminPx * s, this.dmaxPx * s, s));
+    const u = this.pxUnit;
+    const top = -fg[1] * u;
+    const west = -Math.min(st[0], fg[0]) * u;
+    const east = Math.max(st[2], fg[2], nm[2]) * u;
+    const south = Math.max(st[3], nm[3]) * u;
     const out: number[][] = [];
     for (const t of this.list) {
       const a = this.tiles.get(t.id).anchorW;
       const y0 = TILE_TOP;
-      out.push([a.x, y0, a.z - R], [a.x - R, y0, a.z], [a.x + R, y0, a.z], [a.x, y0, a.z + R]);
+      out.push([a.x, y0, a.z - top], [a.x - west, y0, a.z], [a.x + east, y0, a.z], [a.x, y0, a.z + south]);
     }
     return out;
   }
@@ -795,34 +906,14 @@ export class TokenSystem {
     return [1, 0];
   }
 
-  // --- the fight figures -------------------------------------------------------------------------------
+  // --- the figures in a fight ---------------------------------------------------------------------------
 
+  /**
+   * The fighting pair (index.ts, with the ink ring). Every figure already stands on its stone, so there is no
+   * fight-only figure any more (the old one stood beside the stone on a blot); this only records the pair.
+   */
   setFight(pair: TerritoryId[] | null): void {
-    const next = new Set(pair ?? []);
-    for (const t of this.list) {
-      const want = next.has(t.id) && t.shown > 0 ? 1 : 0;
-      const had = this.fight.has(t.id);
-      if (want && !had) {
-        t.denom = denomOf(t.shown);
-        t.figSmoke = 0;
-        t.puff = 0;
-        this.cancel(t, ['figSmoke']);
-        if (this.reduced || this.anim.instant) {
-          t.fig = 1;
-          t.reveal = 1;
-        } else {
-          const from = t.fig;
-          t.reveal = from > 0.5 ? 1 : 0;
-          this.tw(t, 'fig', { ms: 180, ease: ease.outQuad, update: (v) => (t.fig = from + (1 - from) * v) });
-          if (t.reveal < 1) this.tw(t, 'reveal', { ms: 240, ease: (x) => 1 - Math.pow(1 - x, 1.6), update: (v) => (t.reveal = v), done: () => (t.reveal = 1) });
-        }
-      } else if (!next.has(t.id) && (had || t.fig > 0)) {
-        const from = t.fig;
-        if (this.reduced || this.anim.instant) t.fig = 0;
-        else this.tw(t, 'fig', { ms: 300, ease: ease.inQuad, update: (v) => (t.fig = from * (1 - v)), done: () => (t.lean = 0) });
-      }
-    }
-    this.fight = next;
+    this.fight = new Set(pair ?? []);
     this.dirty = true;
   }
 
@@ -874,13 +965,14 @@ export class TokenSystem {
       return;
     }
     const [r, u] = this.screenDir(other ?? t.id, t.id);
-    const k = this.figScale;
+    // knocked back a step, a fifth of the stone's radius (it stays on its stone)
+    const k = this.radiusFor(Math.max(1, t.shown), t.id);
     this.tw(t, 'figOff', {
       ms: 260,
       update: (v) => {
         const e = v < 0.25 ? ease.outQuad(v / 0.25) : 1 - ease.inOutQuad((v - 0.25) / 0.75);
-        t.figOffX = r * 0.32 * k * e;
-        t.figOffY = u * 0.2 * k * e;
+        t.figOffX = r * 0.22 * k * e;
+        t.figOffY = u * 0.14 * k * e;
       },
       done: () => {
         t.figOffX = 0;
@@ -899,12 +991,13 @@ export class TokenSystem {
   // --- the stone's motion ---------------------------------------------------------------------------------
 
   /** The stone's size goes from its current count to `to` (a swell with a little give, or a shrink). */
-  private resize(t: Tok, to: number, ms: number, run: Run | null, overshoot = 0): void {
+  private resize(t: Tok, to: number, ms: number, run: Run | null, overshoot = 0, delay = 0): void {
     const from = t.disp;
     this.tw(t, 'size', {
       ms,
       ease: ease.outCubic,
       run,
+      delay,
       update: (v) => {
         const o = overshoot * Math.sin(Math.PI * v) * (1 - v);
         t.disp = from + (to - from) * v + o * Math.max(1, to);
@@ -928,6 +1021,8 @@ export class TokenSystem {
         t.disp = 0;
         t.alpha = 0;
         t.dry = 0;
+        t.fig = 0;
+        t.figSmoke = 0;
         this.unfreeze(t);
       },
     });
@@ -963,7 +1058,7 @@ export class TokenSystem {
       t.dry = 0;
       t.soak = 0;
       if (t.n > 0) this.unfreeze(t);
-      else t.fig = 0;
+      this.figReset(t);
       if (mode === 'drop' && instant) this.onContact?.(id);
       return;
     }
@@ -988,6 +1083,7 @@ export class TokenSystem {
       }
       t.shown = t.n;
       t.disp = t.n;
+      this.figReset(t);
       if (prev <= 0 || t.alpha < 1) {
         this.unfreeze(t);
         const a0 = t.alpha;
@@ -1008,10 +1104,13 @@ export class TokenSystem {
     // n > 0 from here
     this.cancel(t, ['dry', 'alpha']);
     t.dry = 0;
-    if (prev <= 0 || t.alpha < 0.999) {
+    // a stone standing up again (placed on paper, landed, or back from its smoke): a fresh figure on it
+    const fresh = prev <= 0 || t.alpha < 0.999 || t.fig < 0.999 || t.figSmoke > 0;
+    if (fresh) {
       this.unfreeze(t);
       t.frozen = null;
-      if (prev <= 0) t.disp = 0;
+      if (prev <= 0) t.disp = mode === 'land' ? t.n : 0;
+      this.figReset(t);
     }
     t.alpha = 1;
     t.shown = t.n;
@@ -1025,24 +1124,36 @@ export class TokenSystem {
         this.resize(t, t.n, o.unplace ? 170 : 150, run);
         break;
       case 'hit':
+        // the figure takes the hit (its puff, index.ts, starts on this beat), then the stone gives a step
         this.figHit(t, other, false);
-        this.resize(t, t.n, 200, run);
+        this.resize(t, t.n, 200, run, 0, 90);
         this.tw(t, 'soak', { ms: 240, update: (v) => (t.soak = 0.7 * Math.sin(v * Math.PI)), done: () => (t.soak = 0) });
         break;
       case 'land':
+        // the traveller's stone and figure become this one: it settles, it doesn't grow again
         this.resize(t, t.n, 160, run, 0.03);
         break;
     }
-    if (t.fig > 0 && t.n > 0) {
-      const nd = denomOf(t.n);
-      if (nd !== t.denom) {
-        t.figOld = { denom: t.denom, dry: 0 };
-        t.denom = nd;
-        t.reveal = 0;
-        this.tw(t, 'figOld', { ms: 160, update: (v) => (t.figOld ? (t.figOld.dry = v) : undefined), done: () => (t.figOld = null) });
-        this.tw(t, 'reveal', { ms: 280, delay: 90, ease: (x) => 1 - Math.pow(1 - x, 1.6), update: (v) => (t.reveal = v), done: () => (t.reveal = 1) });
-      }
+    const nd = denomOf(t.n);
+    if (nd !== t.denom) {
+      // a band change: the old figure dissolves as the new one inks in from its feet (160 ms in all)
+      t.figOld = { denom: t.denom, dry: 0 };
+      t.denom = nd;
+      t.reveal = 0;
+      this.tw(t, 'figOld', { ms: 120, update: (v) => (t.figOld ? (t.figOld.dry = v) : undefined), done: () => (t.figOld = null) });
+      this.tw(t, 'reveal', { ms: 120, delay: 40, ease: (x) => 1 - Math.pow(1 - x, 1.6), update: (v) => (t.reveal = v), done: () => (t.reveal = 1) });
     }
+  }
+
+  /** The figure as the count stands now, with nothing in flight (no smoke, no swap). */
+  private figReset(t: Tok): void {
+    this.cancel(t, ['figSmoke', 'figOld', 'reveal', 'puff']);
+    t.fig = t.n > 0 ? 1 : 0;
+    t.figSmoke = 0;
+    t.puff = 0;
+    t.figOld = null;
+    t.reveal = 1;
+    t.denom = denomOf(t.n);
   }
 
   /** A count changed with no motion of its own: the wash deepens once. */
@@ -1100,7 +1211,9 @@ export class TokenSystem {
       top: a.clone(),
       plaque: a.clone(),
       figTop: a.clone(),
-      halfW: this.radiusFor(count),
+      halfW: this.radiusFor(count, to),
+      numH: 1,
+      to,
       alive: true,
       col: lacquer(tileColor),
       deep: deepOf(tileColor),
@@ -1155,19 +1268,36 @@ export class TokenSystem {
     s.push();
   }
 
-  private writeFig(pos: THREE.Vector3, denom: Denom, k: number, alpha: number, reveal: number, smoke: number, dry: number, lean: number, flip: number, ink: number, seed: number, deep: RGB, dim: number, offX: number, offY: number): void {
+  /** A figure `d` (the stone's diameter, world) standing with its feet `offY` along the view's up from `pos`. */
+  private writeFig(pos: THREE.Vector3, denom: Denom, d: number, alpha: number, reveal: number, smoke: number, dry: number, lean: number, flip: number, ink: number, seed: number, deep: RGB, dim: number, offX: number, offY: number, k = FIG_K): void {
     const f = this.figs;
-    if (!f.next() || alpha <= 0.002) return;
+    if (!f.next() || alpha <= 0.002 || d <= 0) return;
     const s = SPRITES[denom];
-    const h = FIG_H[denom] * k;
+    const [w, h] = figDims(denom, d, k);
     f.set('iPos', pos.x, pos.y, pos.z);
-    f.set('iSize', h * ASPECT[denom], h);
+    f.set('iSize', w, h);
     f.set('iUV', s.x / ATLAS.width, 1 - (s.y + s.h) / ATLAS.height, (s.x + s.w) / ATLAS.width, 1 - s.y / ATLAS.height);
     f.set('iA', alpha, reveal, smoke, dry);
     f.set('iB', lean, flip, ink, seed);
     f.set('iC', deep[0], deep[1], deep[2], dim);
     f.set('iOff', offX, offY);
     f.push();
+  }
+
+  /** The figure's painted shadow on its stone: a flat darker-wash dab under the feet, offset lower-right. */
+  private writeFeet(c: THREE.Vector3, R: number, w: number, deep: RGB, alpha: number, seed: number): void {
+    if (alpha <= 0.002 || R <= 0) return;
+    const g = this.upG;
+    const down = FEET * R + 0.05 * R;
+    this.q.set(c.x - g.x * down + this.right.x * 0.07 * R, c.y, c.z - g.z * down + this.right.z * 0.07 * R);
+    this.writeBlot(this.q, Math.min(0.8 * R, Math.max(0.36 * R, w * 0.55)), 0.2 * R, [deep[0] * 0.55, deep[1] * 0.55, deep[2] * 0.55], alpha, seed);
+  }
+  /** Where the numeral sits for a stone of radius R at c: the lower-right edge. */
+  private numAt(c: THREE.Vector3, R: number, out: THREE.Vector3, side = 1): THREE.Vector3 {
+    const g = this.upG;
+    const x = side * NUM_AT[0] * R;
+    const y = NUM_AT[1] * R;
+    return out.set(c.x + this.right.x * x - g.x * y, c.y, c.z + this.right.z * x - g.z * y);
   }
 
   private writeBlot(pos: THREE.Vector3, rx: number, rz: number, col: RGB, alpha: number, seed: number): void {
@@ -1195,7 +1325,8 @@ export class TokenSystem {
     }
     if (!this.dirty && !this.movers.length) return;
     this.dirty = false;
-    const k = this.figScale;
+    const px = this.pxUnit;
+    const ss = this.sizeScale;
     for (const t of this.list) {
       const tile = this.tiles.get(t.id);
       const a = tile.anchorW;
@@ -1208,19 +1339,35 @@ export class TokenSystem {
       const Rn = this.radiusFor(Math.max(1, t.shown), t.id);
       t.top.copy(this.p);
       t.plaque.copy(this.p);
-      t.figTop.copy(this.p);
-      t.halfW = t.shown > 0 ? Math.max(R, Rn * 0.5) : R;
+      const Rs = t.shown > 0 ? Math.max(R, Rn * 0.5) : R;
+      t.halfW = Rs;
+      this.numAt(this.p, Rs, t.figTop, this.numSide.get(t.id) ?? 1);
+      t.numH = numeralPxFor((2 * Rn) / px, ss) * px;
       const dim = tile.dim;
+      const ghost = t.preview !== null && t.preview !== t.shown && t.preview > 0 ? t.preview : 0;
       if (R > 0 && t.alpha > 0.002) this.writeStone(this.p, R, colors.col, colors.deep, t.alpha, { seed: t.seed, dry: t.dry, soak: t.soak, dim });
-      if (t.preview !== null && t.preview !== t.shown && t.preview > 0) this.writeStone(this.p, this.radiusFor(t.preview, t.id), t.col, t.deep, 1, { seed: t.seed, ghost: true, dim });
-      if (t.fig > 0.002) {
-        const hw = this.figHalfW[t.denom] * k;
-        const side = t.flip >= 0 ? -1 : 1;
-        const fp = this.p.clone();
-        fp.x += side * (Math.max(R, Rn) + hw * 0.55);
-        this.writeBlot(fp, Math.max(Rn * 0.6, hw * 1.05), Rn * 0.45, colors.deep, 0.5 * t.fig * (1 - 0.7 * t.figSmoke), t.seed);
-        if (t.figOld) this.writeFig(fp, t.figOld.denom, k, t.fig, 1, 0, t.figOld.dry, t.lean, t.flip, 0, t.seed, colors.deep, dim, t.figOffX, t.figOffY);
-        this.writeFig(fp, t.denom, k, t.fig, t.reveal, Math.max(t.figSmoke, t.puff), 0, t.lean, t.flip, 0, t.seed, colors.deep, dim, t.figOffX, t.figOffY);
+      if (ghost) this.writeStone(this.p, this.radiusFor(ghost, t.id), t.col, t.deep, 1, { seed: t.seed, ghost: true, dim });
+      // the figure standing on the stone: sized with the stone as drawn (it swells with it), fading up as a
+      // new stone grows, drying with it, gone to smoke at 0
+      const smoke = Math.max(t.figSmoke, t.puff);
+      const figA = t.fig * t.alpha * Math.min(1, t.disp) * (t.figSmoke > 0 ? 1 : 1 - t.dry);
+      const fk = this.figKOf(t.id);
+      const [fw, fh] = figDims(t.denom, 2 * Rs, fk);
+      t.ext[0] = t.ext[2] = t.fig > 0.002 ? Math.max(Rs, fw / 2) : Rs;
+      t.ext[1] = t.fig > 0.002 ? Math.max(Rs, fh - FEET * Rs) : Rs;
+      t.ext[3] = Rs;
+      // (a preview in the same band keeps the real figure; one that changes the band shows the new figure as
+      // a ghost in its place — never two figures on one stone)
+      if (ghost && (t.shown <= 0 || denomOf(ghost) !== t.denom)) {
+        const Rg = this.radiusFor(ghost, t.id);
+        const dg = denomOf(ghost);
+        this.writeFig(this.p, dg, 2 * Rg, 0.5 * (t.shown > 0 ? t.alpha : 1), 1, 0, 0, 0, t.flip, 0.4, t.seed, t.deep, dim, 0, -FEET * Rg, fk);
+      } else if (figA > 0.002 && R > 0) {
+        const a = figA * (t.denom === 0 ? SOLDIER_ALPHA : 1);
+        const [ow] = t.figOld ? figDims(t.figOld.denom, 2 * R, fk) : [0];
+        this.writeFeet(this.p, R, Math.max(fw * (R / Rs), ow), colors.deep, 0.42 * a * (1 - 0.8 * Math.min(1, t.figSmoke * 1.5)), t.seed);
+        if (t.figOld) this.writeFig(this.p, t.figOld.denom, 2 * R, a, 1, 0, t.figOld.dry, t.lean, t.flip, 0, t.seed, colors.deep, dim, t.figOffX, t.figOffY - FEET * R, fk);
+        this.writeFig(this.p, t.denom, 2 * R, a, t.reveal, smoke, 0, t.lean, t.flip, 0, t.seed, colors.deep, dim, t.figOffX, t.figOffY - FEET * R, fk);
       }
     }
     for (const tr of this.movers) {
@@ -1235,10 +1382,17 @@ export class TokenSystem {
       this.p.y = TILE_TOP;
       tr.top.copy(this.p);
       tr.plaque.copy(this.p);
-      tr.figTop.copy(this.p);
-      tr.halfW = this.radiusFor(tr.n);
+      tr.halfW = this.radiusFor(tr.n, tr.to);
+      this.numAt(this.p, tr.halfW, tr.figTop, this.numSide.get(tr.to) ?? 1);
+      tr.numH = numeralPxFor((2 * tr.halfW) / px, ss) * px;
       const fadeIn = Math.min(1, tr.t * 10);
-      this.writeStone(this.p, tr.halfW, tr.col, tr.deep, fadeIn, { seed: tr.seed });
+      // the stone and its figure travel together
+      const R = tr.halfW;
+      this.writeStone(this.p, R, tr.col, tr.deep, fadeIn, { seed: tr.seed });
+      const tk = this.figKOf(tr.to);
+      const [fw] = figDims(tr.denom, 2 * R, tk);
+      this.writeFeet(this.p, R, fw, tr.deep, 0.42 * fadeIn, tr.seed);
+      this.writeFig(this.p, tr.denom, 2 * R, fadeIn * (tr.denom === 0 ? SOLDIER_ALPHA : 1), 1, 0, 0, 0, tr.flip, 0, tr.seed, tr.deep, 0, 0, -FEET * R, tk);
     }
     this.blots.commit();
     this.stones.commit();

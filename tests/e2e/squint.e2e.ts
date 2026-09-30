@@ -1,6 +1,6 @@
 // The squint guard (_claude/v3/PLAN.md §5, logic lane): the round-6 board at rest at 1440×900, scaled to
 // 30 % (the friend on the couch), must still read as the power map: the five largest stones and the continent
-// outlines are the highest-contrast MARKS. Contrast = |ΔL*| (CIELAB lightness) on the 30 % frame, of a mark
+// outlines are the highest-contrast MARKS. A stone's box holds the unit figure standing on it (tokens.ts). Contrast = |ΔL*| (CIELAB lightness) on the 30 % frame, of a mark
 // against what it sits on: a stack's strongest pixels (90th percentile of its box) against its own wash; a
 // line's pixels against the median of four points 0.6 board units away (the paper or wash beside it).
 //   gate:    each of the five largest stones weighs ≥ 1.4× the other stones' median at a squint (Σ of its
@@ -119,13 +119,17 @@ const res = await page.evaluate(
     // each territory's wash (raw L*), from its interior away from its stack
     const washL = new Map<string, number>();
     for (const t of tiles.list as { id: string; anchor: [number, number]; clearance: number }[]) {
-      const vals: number[] = [];
-      const r = Math.max(0.6, t.clearance * 0.7);
       const box = d.overlay.pieceRects(t.id)?.box.map((v: number) => v * k);
-      for (const [dx, dy] of [[-1, 0], [1, 0], [0, 1], [0, -1], [-0.7, -0.7], [0.7, -0.7]]) {
-        const [sx, sy] = proj(t.anchor[0] + dx * r, t.anchor[1] + dy * r);
-        if (box && sx >= box[0] - 1 && sx <= box[2] + 1 && sy >= box[1] - 1 && sy <= box[3] + 1) continue;
-        vals.push(at(sx, sy));
+      // (the piece's box now holds its figure too: a territory whose ring falls inside it samples a little wider)
+      let vals: number[] = [];
+      for (let grow = 1; grow <= 2.3 && vals.filter((v) => !isNaN(v)).length < 2; grow *= 1.35) {
+        vals = [];
+        const r = Math.max(0.6, t.clearance * 0.7) * grow;
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, 1], [0, -1], [-0.7, -0.7], [0.7, -0.7]]) {
+          const [sx, sy] = proj(t.anchor[0] + dx * r, t.anchor[1] + dy * r);
+          if (box && sx >= box[0] - 1 && sx <= box[2] + 1 && sy >= box[1] - 1 && sy <= box[3] + 1) continue;
+          vals.push(at(sx, sy));
+        }
       }
       washL.set(t.id, med(vals));
     }

@@ -20,7 +20,7 @@ import { Animator, ease, clamp, type Run } from './anim';
 import { buildScene } from './scene';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { TileSet, deepOf, type Tile, type RimMode } from './tiles';
-import { TokenSystem } from './tokens';
+import { FIG_K, FIG_K_MIN, TokenSystem, pieceEnvelope, type PxBox } from './tokens';
 import { Overlay } from './overlay';
 import { Continents } from './continents';
 import { AttackArrow, FortifyRoute, LiveStroke } from './fx';
@@ -167,7 +167,7 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
   scene.add(lanes.group);
   const live = new LiveStroke(anim, ink.noise);
   scene.add(live.group);
-  // The gold stroke and the fortify route run figure to figure (the figures stand beside their rings).
+  // The gold stroke and the fortify route run stone to stone (each figure stands on its stone).
   const feetOf = (id: TerritoryId) => tokens.feet(id);
   arrow.anchorOf = feetOf;
   route.anchorOf = feetOf;
@@ -260,7 +260,7 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
   const recede = (pair: string[] | null, ms: number) => {
     if ((fightPair?.join('>') ?? '') === (pair?.join('>') ?? '')) return;
     fightPair = pair;
-    // The two fighting territories' figures stand while the ring is up (PLAN §1: figures in fights only).
+    // The fighting pair (every figure stands on its stone at rest now; the pair only faces and leans).
     tokens.setFight(pair as TerritoryId[] | null);
     fightDimMs = reduced || anim.instant ? 0 : ms;
     try {
@@ -2086,7 +2086,7 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     readSafeArea();
     overlay.minPlaque = compact ? 20 : 22;
     overlay.relax = compact;
-    // Phones: figures a touch larger than their share of the map so they read at arm's length.
+    // (figBoost: the old free-standing fight figures' phone size; the figures on the stones scale with them.)
     tokens.figBoost = phoneLand ? 1.25 : compact ? 1.1 : 1;
     tokens.markDirty();
     renderer.setSize(W, H, false);
@@ -2099,14 +2099,20 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     layoutTray();
   };
   /**
-   * A stone never crosses another territory's land nor covers another territory's numeral (lead review
-   * 2026-09-30). At the home view each territory's largest stone (diameter, CSS px) is capped at twice the
-   * smaller of: its anchor's distance to any other territory's land, and its distance to any other anchor less
-   * that numeral's half-size. Floor: the 1-army stone (then the stone stops growing; the numeral carries the
-   * count). Count-independent, so a stone never jumps when a neighbour's count changes.
+   * A stone never crosses another territory's land (lead review 2026-09-30), and a piece — the stone, the figure
+   * standing on it, the numeral at its edge — never covers another territory's figure or numeral (John
+   * 2026-09-30, "Bring the icons back"). At the home view each territory's largest stone (diameter, CSS px)
+   * starts at twice its anchor's distance to any other territory's land; then, for every pair of nearby pieces
+   * whose parts would overlap at their caps (every count's envelope, tokens.pieceEnvelope; stone on stone is the
+   * land rule's), the larger cap steps down 4 % until nothing overlaps. Floor: the 1-army stone (then the stone
+   * stops growing; the numeral carries the count). Count-independent, so a piece never jumps when a
+   * neighbour's count changes. `capsTangled` counts the pairs still overlapping at the floor.
    */
   let capsFloored = 0;
   let capsLowered = 0;
+  let capsTangled: string[] = [];
+  let capsFigSmaller = 0;
+  let capsNumLeft = 0;
   const fitCaps = () => {
     const cam = rig.homeCamera();
     const v = new THREE.Vector3();
@@ -2115,13 +2121,12 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
       return [(v.x * 0.5 + 0.5) * W, (-v.y * 0.5 + 0.5) * H];
     });
     const ppu = homePxPerUnit();
-    const dmin = tokens.dminPx * tokens.sizeScale;
-    const dmax = tokens.dmaxPx * tokens.sizeScale;
-    const numHalf = 7 * tokens.sizeScale;
+    const ss = tokens.sizeScale;
+    const dmin = tokens.dminPx * ss;
+    const dmax = tokens.dmaxPx * ss;
     const caps = TERRITORY_IDS.map((id, i) => {
       const ti = tiles.get(id);
       let land = Infinity;
-      let num = Infinity;
       TERRITORY_IDS.forEach((o, j) => {
         if (j === i) return;
         const tj = tiles.get(o);
@@ -2129,13 +2134,82 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
         const [x0, y0, x1, y1] = tj.bbox;
         const gap = Math.max(x0 - ti.anchor[0], 0, ti.anchor[0] - x1, y0 - ti.anchor[1], 0, ti.anchor[1] - y1);
         if (gap * ppu < dmax) for (const ring of tj.rings) land = Math.min(land, distToRing(ti.anchor[0], ti.anchor[1], ring) * ppu);
-        num = Math.min(num, Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) - numHalf);
       });
-      return Math.max(dmin, Math.min(dmax, 2 * land, 2 * num));
+      return Math.max(dmin, Math.min(dmax, 2 * land));
     });
+    // the pieces' parts at their caps, placed at their anchors
+    type Parts = { stone: PxBox; fig: PxBox; num: PxBox };
+    // (a crowded layout's second lever, once a stone is at its floor: its figure is drawn smaller, to FIG_K_MIN)
+    const figK = TERRITORY_IDS.map(() => FIG_K);
+    // (and last, a numeral at the lower-left edge instead)
+    const side = TERRITORY_IDS.map(() => 1);
+    const at = (i: number): Parts => {
+      const e = pieceEnvelope(caps[i], dmin, dmax, ss, figK[i], side[i]);
+      const [x, y] = pts[i];
+      const mv = (b: PxBox): PxBox => [b[0] + x, b[1] + y, b[2] + x, b[3] + y];
+      return { stone: mv(e.stone), fig: mv(e.fig), num: mv(e.num) };
+    };
+    // (a pixel of air between parts: the drawn boxes snap to the device grid and the stones lie a hair foreshortened)
+    const hit = (a: PxBox, b: PxBox) => {
+      const w = Math.min(a[2], b[2]) - Math.max(a[0], b[0]) + 1;
+      const h = Math.min(a[3], b[3]) - Math.max(a[1], b[1]) + 1;
+      return w > 0 && h > 0;
+    };
+    const tangled = (A: Parts, B: Parts) =>
+      hit(A.fig, B.fig) || hit(A.fig, B.num) || hit(A.fig, B.stone) || hit(A.num, B.fig) || hit(A.num, B.num) || hit(A.num, B.stone) || hit(A.stone, B.fig) || hit(A.stone, B.num);
+    const near: [number, number][] = [];
+    const reach = dmax * 2.6;
+    for (let i = 0; i < pts.length; i++)
+      for (let j = i + 1; j < pts.length; j++) if (Math.abs(pts[i][0] - pts[j][0]) < reach && Math.abs(pts[i][1] - pts[j][1]) < reach) near.push([i, j]);
+    let parts = TERRITORY_IDS.map((_, i) => at(i));
+    for (let it = 0; it < 80; it++) {
+      let changed = false;
+      for (const [i, j] of near) {
+        if (!tangled(parts[i], parts[j])) continue;
+        // the larger piece gives way (both when level); a pair at the floor stays as it is
+        const k = caps[i] > caps[j] + 0.01 ? [i] : caps[j] > caps[i] + 0.01 ? [j] : [i, j];
+        let moved = false;
+        for (const x of k)
+          if (caps[x] > dmin + 1e-6) {
+            caps[x] = Math.max(dmin, caps[x] * 0.96);
+            parts[x] = at(x);
+            moved = true;
+          }
+        if (!moved)
+          for (const x of [i, j])
+            if (figK[x] > FIG_K_MIN + 1e-6) {
+              figK[x] = Math.max(FIG_K_MIN, figK[x] * 0.95);
+              parts[x] = at(x);
+              moved = true;
+            }
+        if (!moved)
+          for (const x of [i, j]) {
+            if (side[x] < 0) continue;
+            side[x] = -1;
+            const P = at(x);
+            const o = x === i ? parts[j] : parts[i];
+            if (tangled(P, o)) side[x] = 1;
+            else {
+              parts[x] = P;
+              moved = true;
+              break;
+            }
+          }
+        if (moved) changed = true;
+      }
+      if (!changed) break;
+    }
+    parts = TERRITORY_IDS.map((_, i) => at(i));
+    capsTangled = near.filter(([i, j]) => tangled(parts[i], parts[j])).map(([i, j]) => `${TERRITORY_IDS[i]}/${TERRITORY_IDS[j]}`);
     capsFloored = caps.filter((c) => c <= dmin + 1e-6).length;
     capsLowered = caps.filter((c) => c < dmax - 1e-6).length;
-    tokens.setCaps(new Map(TERRITORY_IDS.map((id, i) => [id, caps[i]])));
+    capsFigSmaller = figK.filter((k) => k < FIG_K - 1e-6).length;
+    capsNumLeft = side.filter((v) => v < 0).length;
+    tokens.setCaps(
+      new Map(TERRITORY_IDS.map((id, i) => [id, caps[i]])),
+      new Map(TERRITORY_IDS.map((id, i) => [id, figK[i]])),
+      new Map(TERRITORY_IDS.map((id, i) => [id, side[i]])),
+    );
   };
 
   /** The dice tray's own band height when the HUD doesn't report one (tray + a little air). */
@@ -2160,7 +2234,10 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     rig.trayKeepOut = { x0: W / 2 - g.trayW / 2 - 12, x1: W / 2 + g.trayW / 2 + 12, y0: H - insets.bottom - kb + (kb - g.trayH) / 2 - clear };
     // The stones are sized in CSS px at the home view (14 → 36 px at 1440×900; phones 15.5 → 26, so a 1-army numeral is ≥ 11 px without the floor), so their
     // board size follows the home scale: fit, size, fit again.
-    tokens.dminPx = compact ? 15.5 : 14;
+    // (Landscape phones: the numeral now sits at the stone's edge, so the floor no longer has to hold an 11 px
+    // numeral inside; a smaller floor lets the crowded pieces clear each other.)
+    const phoneLandNow = compact && W > H;
+    tokens.dminPx = phoneLandNow ? 12.5 : compact ? 15.5 : 14;
     tokens.dmaxPx = compact ? 26 : 36;
     for (let it = 0; it < 3; it++) {
       setPieceExtents();
@@ -2818,6 +2895,18 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     },
     get capsLowered() {
       return capsLowered;
+    },
+    /** Pairs of pieces that still overlap with both at the 1-army floor (fitCaps). */
+    get capsTangled() {
+      return capsTangled;
+    },
+    /** Territories whose figure is drawn under FIG_K to clear a neighbour (after the stone floor). */
+    get capsFigSmaller() {
+      return capsFigSmaller;
+    },
+    /** Territories whose numeral sits at the lower-left edge to clear a neighbour. */
+    get capsNumLeft() {
+      return capsNumLeft;
     },
     lanes,
     continents,

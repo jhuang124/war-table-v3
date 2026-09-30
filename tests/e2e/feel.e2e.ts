@@ -136,13 +136,21 @@ for (const vp of [
   const { browser, page, errors } = await open(undefined, { width: 1280, height: 800 });
   await loadScenario(page, scenario({ ural: [0, 3], ukraine: [0, 2], siberia: [0, 1] }, reinforce(6)));
   await page.waitForTimeout(1500);
-  const badges = await page.evaluate(() =>
-    [...document.querySelectorAll<HTMLElement>('.rb-badge')].filter((b) => b.style.visibility !== 'hidden').map((b) => ({ w: b.getBoundingClientRect().width, fs: parseFloat(getComputedStyle(b).fontSize) })),
-  );
-  // v3: the army is a painted stone sized by its count (14 px for 1 army at 1440×900); its numeral ≥ 11 px
-  const minW = Math.min(...badges.map((b) => b.w));
+  const badges = await page.evaluate(() => {
+    const tk = (window as unknown as { __board: { __debug: { tokens: { stoneOf: (id: string) => { dPx: number; figWPx: number; figHPx: number } } } } }).__board.__debug.tokens;
+    return [...document.querySelectorAll<HTMLElement>('.rb-badge')]
+      .filter((b) => b.style.visibility !== 'hidden')
+      .map((b) => {
+        const st = tk.stoneOf(b.dataset.t!);
+        return { d: st.dPx, fig: Math.max(st.figWPx, st.figHPx), fs: parseFloat(getComputedStyle(b).fontSize) };
+      });
+  });
+  // v3: the army is a painted stone sized by its count (18 px for 1 army at 1440×900, never under the 14 px
+  // floor), its unit figure standing on it (≥ 14 px long: a sprite under that blurs), its numeral at the edge ≥ 11 px
+  const minW = Math.min(...badges.map((b) => b.d));
+  const minFig = Math.min(...badges.map((b) => b.fig));
   const minF = Math.min(...badges.map((b) => b.fs));
-  check(badges.length === 42 && minW >= 13.5 && minF >= 11, `army stones at home on 1280×800: ${badges.length} visible, stones ≥ ${minW.toFixed(1)} px across (≥ 14, the 1-army stone), numerals ≥ ${minF.toFixed(1)} px (≥ 11)`, results);
+  check(badges.length === 42 && minW >= 13.5 && minFig >= 14 && minF >= 11, `army pieces at home on 1280×800: ${badges.length} visible, stones ≥ ${minW.toFixed(1)} px across (≥ 14), figures ≥ ${minFig.toFixed(1)} px long (≥ 14), numerals ≥ ${minF.toFixed(1)} px (≥ 11)`, results);
   const st0 = await page.evaluate(() => window.__risk.stats());
   check(st0.activeTweens === 0 && !st0.cameraMoving, `idle board: ${st0.activeTweens} tweens, camera ${st0.cameraMoving ? 'moving' : 'still'}`, results);
   await page.screenshot({ path: `${ART}/feel-home-1280x800.png` });

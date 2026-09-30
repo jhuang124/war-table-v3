@@ -1,7 +1,8 @@
 // The table cues (_claude/v3/PLAN.md §2–3, §5), logic lane: the turn banner arrives with the turn, the
 // ledger writes one plain sentence per event over a scripted turn, a captured continent's outline takes
-// its holder's colour, every stone is sized by its count, the numeral centred on it
-// reads the count, and the cup sits beside the current seat's ring.
+// its holder's colour, every stone is sized by its count with its unit figure standing on it (soldier 1–4,
+// rider 5–9, cannon 10+, scaled to the stone), the numeral at its edge reads the count, and the cup sits
+// beside the current seat's ring.
 import { ONE_HUMAN, check, clickBtn, clickT, finish, idle, loadScenario, open, scenario, seg, state, ui } from './lib';
 import { openDevice } from './mobile-lib';
 import type { Page } from 'playwright';
@@ -12,7 +13,13 @@ const results: string[] = [];
 const { browser, page, errors } = await open();
 
 type Dbg = {
-  tokens: { stoneOf: (id: string) => { n: number; dPx: number; capPx: number; alpha: number }; dminPx: number; dmaxPx: number; sizeScale: number };
+  tokens: {
+    stoneOf: (id: string) => { n: number; dPx: number; capPx: number; alpha: number; denom: number; fig: number; figWPx: number; figHPx: number };
+    figKOf: (id: string) => number;
+    dminPx: number;
+    dmaxPx: number;
+    sizeScale: number;
+  };
   continents: { state: () => Record<string, { holder: number; amount: number; color: [number, number, number] }> };
 };
 const dbg = `(window.__board).__debug`;
@@ -33,10 +40,34 @@ const sizes = () => page.evaluate((d) => { const k = (eval(d) as Dbg).tokens; re
     // area-linear: d = dmin + (dmax − dmin) · √(min(n, 30) / 30), then this territory's cap
     const want = Math.min(dmin + (dmax - dmin) * Math.sqrt(Math.min(n, 30) / 30), Math.max(dmin, st.capPx));
     if (st.n !== n || Math.abs(st.dPx - want) > 0.05) bad.push(`${t}: ${n} armies, stone ${st.dPx.toFixed(1)} px (want ${want.toFixed(1)})`);
+    // the figure on it: its band, and its long side 1.1 × the stone (a crowded layout may draw it smaller)
+    const band = n >= 10 ? 2 : n >= 5 ? 1 : 0;
+    const k = await page.evaluate(([d, id]) => (eval(d) as Dbg).tokens.figKOf(id), [dbg, t] as const);
+    const long = Math.max(st.figWPx, st.figHPx);
+    if (st.denom !== band || st.fig < 0.99 || Math.abs(long - k * st.dPx) > 0.1 || k > 1.1 + 1e-6)
+      bad.push(`${t}: ${n} armies, figure band ${st.denom} (want ${band}), shown ${st.fig}, ${long.toFixed(1)} px long on a ${st.dPx.toFixed(1)} px stone (× ${k.toFixed(2)})`);
     const txt = await page.evaluate((id) => document.querySelector(`.rb-badge[data-t="${id}"] .n`)?.textContent ?? '', t);
     if (txt !== String(n)) bad.push(`${t}: numeral "${txt}" for ${n}`);
   }
-  check(bad.length === 0, `10 stones sized by their counts (area-linear, capped), numerals match (${bad.join('; ') || pick.join(', ')})`, results);
+  check(bad.length === 0, `10 stones sized by their counts (area-linear, capped), each with its figure standing on it (soldier / rider / cannon, 1.1 × the stone), numerals match (${bad.join('; ') || pick.join(', ')})`, results);
+  // the numeral sits at the stone's lower-right edge, off the figure
+  const edge = await page.evaluate((d) => {
+    const o = (eval(d) as { overlay: { pieceRects: (id: string) => { plaque: number[]; fig: number[] } | null } }).overlay;
+    const out: string[] = [];
+    for (const id of ['ural', 'china', 'peru', 'india']) {
+      const r = o.pieceRects(id);
+      if (!r) continue;
+      const [nx0, ny0, nx1, ny1] = r.plaque;
+      const [fx0, fy0, fx1, fy1] = r.fig;
+      const cx = (fx0 + fx1) / 2;
+      const nc = [(nx0 + nx1) / 2, (ny0 + ny1) / 2];
+      if (!(nc[0] > cx && ny1 > fy1 - 2 && ny0 > fy0)) out.push(`${id}: numeral ${r.plaque.map(Math.round)} vs piece ${r.fig.map(Math.round)}`);
+      const fs = parseFloat(getComputedStyle(document.querySelector(`.rb-badge[data-t="${id}"]`)!).fontSize);
+      if (fs < 11) out.push(`${id}: numeral ${fs} px`);
+    }
+    return out;
+  }, dbg);
+  check(edge.length === 0, `the numeral sits at the stone's lower-right edge, ≥ 11 px (Ural 19, China 5, Peru 1, India 25)${edge.length ? ` — ${edge.join('; ')}` : ''}`, results);
   // larger means more, to the cap; the numeral carries the rest
   const h = await Promise.all(['peru', 'china', 'ukraine', 'ural'].map(stoneOf));
   check(h[0].dPx < h[1].dPx && h[1].dPx < h[2].dPx && h[2].dPx <= h[3].dPx, `larger means more: 1 → 5 → 6 → 19 armies are ${h.map((x) => x.dPx.toFixed(1)).join(' · ')} px across`, results);
@@ -162,30 +193,55 @@ const sizes = () => page.evaluate((d) => { const k = (eval(d) as Dbg).tokens; re
 
 await browser.close();
 
-// --- 4. a stack never covers another territory's numeral, at home, on all three form factors ---------------
+// --- 4. a piece (stone + figure) never covers another territory's numeral or figure, at home, on all three form factors
 {
-  /** Every (stack body, other numeral) overlap over 2 px², at the home view. */
+  /**
+   * Every overlap over 2 px², at the home view, of a piece's stone-and-figure box or its numeral with another
+   * territory's numeral or figure (a stone's own disc against a neighbour's is the land rule's: stones stay on
+   * their own land). A figure's box is its sprite's quad above the stone.
+   */
   const overlaps = (p: Page) =>
     p.evaluate(() => {
-      const d = (window as unknown as { __board: { __debug: { overlay: { pieceRects: (id: string) => { box: number[] } | null }; tiles: { list: { id: string }[] }; capsFloored: number; capsLowered: number } } }).__board.__debug;
+      type PR = { box: number[]; plaque: number[]; fig: number[] };
+      const d = (window as unknown as { __board: { __debug: { overlay: { pieceRects: (id: string) => PR | null }; tiles: { list: { id: string }[] }; capsFloored: number; capsLowered: number; capsFigSmaller: number; capsTangled: string[] } } }).__board.__debug;
       const out: string[] = [];
-      const nums = new Map<string, DOMRect>();
-      document.querySelectorAll<HTMLElement>('.rb-badge').forEach((b) => {
-        if (b.style.visibility !== 'hidden') nums.set(b.dataset.t!, b.getBoundingClientRect());
-      });
       const cr = (document.querySelector('canvas') as HTMLCanvasElement).getBoundingClientRect();
+      const nums = new Map<string, number[]>();
+      document.querySelectorAll<HTMLElement>('.rb-badge').forEach((b) => {
+        if (b.style.visibility === 'hidden') return;
+        const r = b.getBoundingClientRect();
+        nums.set(b.dataset.t!, [r.left, r.top, r.right, r.bottom]);
+      });
+      const piece = new Map<string, number[]>();
       for (const t of d.tiles.list) {
         const r = d.overlay.pieceRects(t.id);
-        if (!r) continue;
-        const [x0, y0, x1, y1] = [r.box[0] + cr.left, r.box[1] + cr.top, r.box[2] + cr.left, r.box[3] + cr.top];
-        for (const [o, n] of nums) {
-          if (o === t.id) continue;
-          const w = Math.min(x1, n.right) - Math.max(x0, n.left);
-          const h = Math.min(y1, n.bottom) - Math.max(y0, n.top);
-          if (w > 0 && h > 0 && w * h > 2) out.push(`${t.id}'s stone over ${o}'s numeral (${Math.round(w)}×${Math.round(h)})`);
+        if (r) piece.set(t.id, [r.fig[0] + cr.left, r.fig[1] + cr.top, r.fig[2] + cr.left, r.fig[3] + cr.top]);
+      }
+      const over = (a: number[], b: number[]) => {
+        const w = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+        const h = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+        return w > 0 && h > 0 && w * h > 2 ? `${Math.round(w)}×${Math.round(h)}` : '';
+      };
+      for (const [id, a] of piece)
+        for (const [o, b] of [...nums].filter(([k]) => k !== id)) {
+          const x = over(a, b);
+          if (x) out.push(`${id}'s piece over ${o}'s numeral (${x})`);
+        }
+      for (const [id, a] of nums)
+        for (const [o, b] of [...nums].filter(([k]) => k > id)) {
+          const x = over(a, b);
+          if (x) out.push(`${id}'s numeral on ${o}'s (${x})`);
+        }
+      // a figure against another piece: the part of the box above its stone (the stone is square, the figure rises)
+      for (const [id, a] of piece) {
+        const up = [a[0], a[1], a[2], a[1] + Math.max(0, a[3] - a[1] - (a[2] - a[0]))];
+        if (up[3] - up[1] < 1) continue;
+        for (const [o, b] of [...piece].filter(([k]) => k !== id)) {
+          const x = over(up, b);
+          if (x) out.push(`${id}'s figure over ${o}'s piece (${x})`);
         }
       }
-      return { out, floored: d.capsFloored, lowered: d.capsLowered };
+      return { out, floored: d.capsFloored, lowered: d.capsLowered, smaller: d.capsFigSmaller, tangled: d.capsTangled };
     });
   const tall = scenario({}, { kind: 'attack' }, { fill: (_t, i) => [1 + (i % 3), 30] });
   const mixed = scenario({}, { kind: 'attack' }, { fill: (_t, i) => [1 + (i % 3), i % 2 ? 1 : 40] });
@@ -194,15 +250,17 @@ await browser.close();
     const bad: string[] = [];
     let floored = 0;
     let lowered = 0;
+    let smaller = 0;
     for (const s of [tall, mixed]) {
       await loadScenario(ctx.page, s);
       await ctx.page.waitForTimeout(300);
       const r = await overlaps(ctx.page);
-      bad.push(...r.out);
+      bad.push(...r.out, ...r.tangled.map((x) => `caps left ${x} tangled`));
       floored = r.floored;
       lowered = r.lowered;
+      smaller = r.smaller;
     }
-    check(bad.length === 0, `${form}: no stone covers another territory's numeral at home (every stone at 30 and at 1/40; ${lowered} stones held under full size to clear a neighbour, ${floored} of them at the 1-army size)${bad.length ? ` — ${bad.slice(0, 6).join('; ')}` : ''}`, results);
+    check(bad.length === 0, `${form}: no piece (stone + figure) or numeral covers another territory's numeral or figure at home (every stone at 30 and at 1/40; ${lowered} stones held under full size to clear a neighbour, ${floored} of them at the 1-army size, ${smaller} figures drawn under 1.1 × their stone)${bad.length ? ` — ${bad.slice(0, 6).join('; ')}` : ''}`, results);
     errors.push(...ctx.errors);
     await ctx.browser.close();
   }
