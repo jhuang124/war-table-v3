@@ -50,7 +50,6 @@ import {
   type PlayerKind,
   type PlayerId,
   type TerritoryId,
-  type PlayerColorId,
 } from '../engine';
 import { DEFAULT_MAP_ID, activeMapId, isKnownMap, listMaps } from '../map/registry';
 import type { AudioEngine, PlayOptions, SfxName } from '../audio/types';
@@ -70,6 +69,7 @@ import {
   patchSeat,
   removeSeat,
   sanitizeDraft,
+  trucesApply,
   type NewGameDraft,
 } from './presets';
 import { reconcile } from './reconcile';
@@ -447,51 +447,15 @@ function isAttackAction(a: Action): a is Extract<Action, { type: 'attack' | 'bli
 // v3 New game extras: the map, seat personalities, Neutral armies, Truces
 // ---------------------------------------------------------------------------
 
-/** The New game draft plus the map pick (presets.ts's NewGameDraft predates map packs). */
-export type DraftX = NewGameDraft & { mapId?: string };
-
 /** One boot-time instruction across a reload (a game on another map; a Continue onto another map). */
 const BOOT_KEY = 'risk3d.boot.v1';
 type BootFile = { v: 1; start?: GameConfig; resume?: boolean };
 
+/** Diplomacy events: HUD only (display.ts lists them non-blocking; the board is never asked to play them). */
+const TRUCE_EVENTS: ReadonlySet<GameEvent['type']> = new Set(['truceProposed', 'truceAccepted', 'truceDeclined', 'truceBroken', 'truceExpired']);
+
 /** A truce the dock offers: 3 rounds, no attacks (the one kind the engine knows). */
 const TRUCE_ROUNDS = 3;
-
-/**
- * The draft's v3 extras, read back from `raw` (a remembered or patched draft; presets.ts's sanitizeDraft
- * drops fields it doesn't know): each AI seat's personality (a missing one is filled with the least-used of
- * Turtle · Opportunist · Warlord, in that order, so a fresh table has three different AIs), the Neutral armies
- * and Truces house rules (default on), and the map (default classic).
- */
-export function withDraftExtras(d: NewGameDraft, raw: unknown = d): DraftX {
-  const r = (raw && typeof raw === 'object' ? raw : {}) as { mapId?: unknown; seats?: { personality?: unknown }[]; house?: { neutral?: unknown; truces?: unknown } };
-  const seats: SeatDraft[] = d.seats.map((s, i) => {
-    const want = r.seats?.[i]?.personality ?? s.personality;
-    const { personality: _drop, ...rest } = s;
-    void _drop;
-    return isPersonality(want) ? { ...rest, personality: want } : rest;
-  });
-  const used = new Map<AiPersonality, number>(PERSONALITY_IDS.map((id) => [id, 0]));
-  for (const s of seats) if (s.kind === 'ai' && s.personality) used.set(s.personality, (used.get(s.personality) ?? 0) + 1);
-  for (const s of seats) {
-    if (s.kind !== 'ai' || s.personality) continue;
-    const pick = [...PERSONALITY_IDS].sort((a, b) => used.get(a)! - used.get(b)! || PERSONALITY_IDS.indexOf(a) - PERSONALITY_IDS.indexOf(b))[0];
-    s.personality = pick;
-    used.set(pick, used.get(pick)! + 1);
-  }
-  const mapId = typeof r.mapId === 'string' && isKnownMap(r.mapId) ? r.mapId : DEFAULT_MAP_ID;
-  return {
-    ...d,
-    seats,
-    house: { ...d.house, neutral: r.house?.neutral !== false, truces: r.house?.truces !== false },
-    mapId,
-  };
-}
-
-/** Truces apply: at least one human and one AI with a personality at the table. */
-function trucesApply(seats: { kind: PlayerKind; personality?: AiPersonality }[]): boolean {
-  return seats.some((s) => s.kind === 'human') && seats.some((s) => s.kind === 'ai' && isPersonality(s.personality));
-}
 
 /** Reload this page onto whatever the save says (a `?map=` override is dropped: the save decides). */
 function reloadPage(): void {
@@ -502,25 +466,8 @@ function reloadPage(): void {
   } else location.reload();
 }
 
-/** The GameConfig a draft starts: presets.ts's mapping plus the map and diplomacy (v3). */
-export function draftConfig(d: DraftX, seed: number): GameConfig {
-  const c = draftToConfig(d, seed);
-  const diplomacy = d.house.truces !== false && trucesApply(c.players);
-  return { ...c, mapId: d.mapId ?? DEFAULT_MAP_ID, ...(diplomacy ? { diplomacy: true } : {}) };
-}
-
-/**
- * The 2-player neutral seat is drawn in the neutral grey (v3). The engine deals it one of the six ids;
- * repaint it (mutates `s`: a fresh game or a loaded save, before anything reads it). Every later state
- * is the engine's clone of this one, so the colour carries through the game and the save.
- */
-function paintNeutral(s: GameState): GameState {
-  for (const p of s.players) if (p.neutral && (p.color as string) !== 'neutral') p.color = 'neutral' as PlayerColorId;
-  return s;
-}
-
 /** The New game screen's v3 fields: the map picker, the personalities, which house rules apply. */
-function newGameExtras(d: DraftX): Pick<NewGameVM, 'maps' | 'mapId' | 'personalities' | 'neutralApplies' | 'trucesApply'> {
+function newGameExtras(d: NewGameDraft): Pick<NewGameVM, 'maps' | 'mapId' | 'personalities' | 'neutralApplies' | 'trucesApply'> {
   const n = d.seats.length;
   return {
     maps: listMaps().map((m) => ({
@@ -564,7 +511,7 @@ class Controller {
   private overlay: Overlay = null;
   private overlayReturn: Overlay = null;
   private settings: Settings = { ...DEFAULT_SETTINGS };
-  private draft: DraftX = withDraftExtras(defaultDraft());
+  private draft: NewGameDraft = defaultDraft();
   /** v3 diplomacy: the driver tapped `Truce` and is choosing a seat (the eligible rings are lit). */
   private truceMode = false;
   /** v3: a new build took over (service worker controllerchange) while a game is on. */
@@ -684,7 +631,7 @@ class Controller {
     this.haptics = createHaptics(this.touch);
     this.settings = sanitizeSettings(readJson(this.kv, SETTINGS_KEY), this.touch);
     const ui = readJson<UiFile>(this.kv, UI_KEY);
-    if (ui?.lastSetup) this.draft = withDraftExtras(sanitizeDraft(ui.lastSetup), ui.lastSetup);
+    if (ui?.lastSetup) this.draft = sanitizeDraft(ui.lastSetup);
     this.bootMap = opts.bootMap ?? activeMapId();
     this.reloadFn = opts.reload ?? (typeof location !== 'undefined' && typeof window !== 'undefined' ? () => reloadPage() : null);
     this.refreshSaveSummary();
@@ -951,7 +898,6 @@ class Controller {
       return;
     }
     const { state, events } = createGame(config);
-    paintNeutral(state);
     this.resetGameLocals();
     this.state = state;
     this.meta = freshMeta(state.id);
@@ -1015,7 +961,7 @@ class Controller {
   private loadSave(): boolean {
     const f = readJson<SaveFile>(this.kv, SAVE_KEY);
     if (!f || !isPlausibleState(f.state) || f.state.phase.kind === 'game-over') return false;
-    const s = paintNeutral(f.state);
+    const s = f.state;
     this.resetGameLocals();
     this.state = s;
     this.disp = cloneState(s);
@@ -1247,7 +1193,8 @@ class Controller {
           this.inflight++;
           let p: Promise<void>;
           try {
-            p = this.board.playEvent(e.ev, e.after, e.opts);
+            // A truce event is words only (the line, the ledger): the board has nothing to play or wait for.
+            p = TRUCE_EVENTS.has(e.ev.type) ? Promise.resolve() : this.board.playEvent(e.ev, e.after, e.opts);
           } catch (err) {
             console.error(err);
             p = Promise.resolve();
@@ -2692,15 +2639,15 @@ class Controller {
         break;
       }
       case 'seat':
-        this.draft = withDraftExtras({ ...patchSeat(this.draft, i.index, i.patch), mapId: this.draft.mapId } as DraftX);
+        this.draft = patchSeat(this.draft, i.index, i.patch);
         this.rememberDraft();
         break;
       case 'addSeat':
-        this.draft = withDraftExtras({ ...addSeat(this.draft), mapId: this.draft.mapId } as DraftX);
+        this.draft = addSeat(this.draft);
         this.rememberDraft();
         break;
       case 'removeSeat':
-        this.draft = withDraftExtras({ ...removeSeat(this.draft, i.index), mapId: this.draft.mapId } as DraftX);
+        this.draft = removeSeat(this.draft, i.index);
         this.rememberDraft();
         break;
       case 'map':
@@ -2716,22 +2663,19 @@ class Controller {
         this.rememberDraft();
         break;
       case 'house':
-        {
-          const next = { ...this.draft, house: { ...this.draft.house, ...i.patch } };
-          this.draft = withDraftExtras(sanitizeDraft(next), next);
-        }
+        this.draft = sanitizeDraft({ ...this.draft, house: { ...this.draft.house, ...i.patch } });
         this.rememberDraft();
         break;
       case 'start': {
         const vm = buildNewGameVM(this.draft);
         if (!vm.canStart) break;
         this.rememberDraft();
-        const config = draftConfig(this.draft, this.randomSeed());
+        const config = draftToConfig(this.draft, this.randomSeed());
         // The board's geometry is fixed per page load: a game on another map starts after a reload onto it
         // (the save names the map, src/map/registry.ts activeMapId; the deal plays from BOOT_KEY).
         if ((config.mapId ?? DEFAULT_MAP_ID) !== this.bootMap && !validateConfig(config)) {
           const { state } = createGame(config);
-          writeJson(this.kv, SAVE_KEY, { v: 1, savedAt: Date.now(), state: paintNeutral(state) } satisfies SaveFile);
+          writeJson(this.kv, SAVE_KEY, { v: 1, savedAt: Date.now(), state } satisfies SaveFile);
           if (this.reloadOnto({ v: 1, start: config })) break;
         }
         this.startGame(config);
@@ -3944,7 +3888,8 @@ class Controller {
     // screen's draft carries them). A game started here plays on this page's board unless it says otherwise.
     const base = draftToConfig(this.draft, this.randomSeed());
     base.players = base.players.map(({ personality: _p, ...rest }) => (void _p, rest));
-    if (this.bootMap !== DEFAULT_MAP_ID) base.mapId = this.bootMap;
+    delete base.diplomacy;
+    base.mapId = this.bootMap;
     const players = config?.players ?? base.players;
     const n = players.length;
     const rules = lengthRules(this.draft.length, n);

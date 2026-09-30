@@ -26,11 +26,10 @@ import { brushMark } from './enso';
 export type SeatEmblem = 'triangle' | 'circle' | 'square' | 'diamond' | 'star' | 'cross' | 'dash';
 
 /**
- * A seat's colour: one of the six a player can pick, or 'neutral' (v3, additive): the 2-player neutral
- * seat's muted grey wash. The engine still deals that seat one of the six ids; the controller repaints it
- * 'neutral' (src/game/controller.ts paintNeutral) until PlayerColorId itself grows the id.
+ * A seat's colour: one of the six a player can pick, or 'neutral' (v3): the 2-player neutral seat's muted
+ * grey wash, which the engine deals that seat. Kept as an alias; PlayerColorId now carries 'neutral'.
  */
-export type SeatColorId = PlayerColorId | 'neutral';
+export type SeatColorId = PlayerColorId;
 
 export interface PlayerPalette {
   id: SeatColorId;
