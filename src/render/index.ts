@@ -20,7 +20,7 @@ import { Animator, ease, clamp, type Run } from './anim';
 import { buildScene } from './scene';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { TileSet, deepOf, type Tile, type RimMode } from './tiles';
-import { FIG_K, FIG_K_MIN, TokenSystem, pieceEnvelope, type PxBox } from './tokens';
+import { FIG_K, FIG_K_MIN, NUMERAL_MIN, NUMERAL_MIN_PHONE, TokenSystem, pieceEnvelope, type PxBox } from './tokens';
 import { Overlay } from './overlay';
 import { Continents } from './continents';
 import { AttackArrow, FortifyRoute, LiveStroke } from './fx';
@@ -2106,10 +2106,30 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
    * whose parts would overlap at their caps (every count's envelope, tokens.pieceEnvelope; stone on stone is the
    * land rule's), the larger cap steps down 4 % until nothing overlaps. Floor: the 1-army stone (then the stone
    * stops growing; the numeral carries the count). Count-independent, so a piece never jumps when a
-   * neighbour's count changes. `capsTangled` counts the pairs still overlapping at the floor.
+   * neighbour's count changes — with one exception (lead review 2026-09-30): the board's three largest stacks
+   * are exempt. Against one of them the neighbour gives way (its stone to the floor, then its figure to 0.7×,
+   * then its numeral to the lower-left edge); only if that still can't clear, the big one's stone gives a
+   * step (`capsLost` names it). The caps are fitted again when the three largest change.
+   * `capsTangled` lists the pairs still overlapping at the floor.
    */
   let capsFloored = 0;
   let capsLowered = 0;
+  let capsLost: string[] = [];
+  /** The board's three largest stacks (exempt from the floor), and the key the caps were fitted for. */
+  const bigThree = (): TerritoryId[] => {
+    const top: TerritoryId[] = [];
+    for (const id of TERRITORY_IDS) {
+      if (!(armies[id] > 0)) continue;
+      let k = top.length;
+      while (k > 0 && armies[top[k - 1]] < armies[id]) k--;
+      if (k < 3) {
+        top.splice(k, 0, id);
+        if (top.length > 3) top.pop();
+      }
+    }
+    return top;
+  };
+  let bigKey = '';
   let capsTangled: string[] = [];
   let capsFigSmaller = 0;
   let capsNumLeft = 0;
@@ -2144,7 +2164,7 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     // (and last, a numeral at the lower-left edge instead)
     const side = TERRITORY_IDS.map(() => 1);
     const at = (i: number): Parts => {
-      const e = pieceEnvelope(caps[i], dmin, dmax, ss, figK[i], side[i]);
+      const e = pieceEnvelope(caps[i], dmin, dmax, ss, figK[i], side[i], tokens.numMin);
       const [x, y] = pts[i];
       const mv = (b: PxBox): PxBox => [b[0] + x, b[1] + y, b[2] + x, b[3] + y];
       return { stone: mv(e.stone), fig: mv(e.fig), num: mv(e.num) };
@@ -2157,15 +2177,77 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     };
     const tangled = (A: Parts, B: Parts) =>
       hit(A.fig, B.fig) || hit(A.fig, B.num) || hit(A.fig, B.stone) || hit(A.num, B.fig) || hit(A.num, B.num) || hit(A.num, B.stone) || hit(A.stone, B.fig) || hit(A.stone, B.num);
+    // (one of the three largest against a neighbour: only the numerals must stay clear — the big piece may
+    // stand over the neighbour's shrunken figure, never over its count)
+    const numTangled = (A: Parts, B: Parts) => hit(A.fig, B.num) || hit(A.num, B.fig) || hit(A.num, B.num) || hit(A.num, B.stone) || hit(A.stone, B.num);
     const near: [number, number][] = [];
     const reach = dmax * 2.6;
     for (let i = 0; i < pts.length; i++)
       for (let j = i + 1; j < pts.length; j++) if (Math.abs(pts[i][0] - pts[j][0]) < reach && Math.abs(pts[i][1] - pts[j][1]) < reach) near.push([i, j]);
+    const bigIds = bigThree();
+    bigKey = bigIds.join(',');
+    const big = TERRITORY_IDS.map((id) => bigIds.includes(id));
+    const lost = new Set<number>();
     let parts = TERRITORY_IDS.map((_, i) => at(i));
-    for (let it = 0; it < 80; it++) {
+    /** One of the three largest against a neighbour: the neighbour gives way, the big one last. */
+    const yieldTo = (b: number, o: number): boolean => {
+      if (caps[o] > dmin + 1e-6) {
+        caps[o] = Math.max(dmin, caps[o] * 0.96);
+        parts[o] = at(o);
+        return true;
+      }
+      if (figK[o] > FIG_K_MIN + 1e-6) {
+        figK[o] = Math.max(FIG_K_MIN, figK[o] * 0.95);
+        parts[o] = at(o);
+        return true;
+      }
+      if (side[o] > 0) {
+        side[o] = -1;
+        const P = at(o);
+        if (!numTangled(P, parts[b])) {
+          parts[o] = P;
+          return true;
+        }
+        side[o] = 1;
+      }
+      // (the big one's own numeral to its lower-left edge, before its stone gives way)
+      if (side[b] > 0) {
+        side[b] = -1;
+        const P = at(b);
+        if (!numTangled(P, parts[o])) {
+          parts[b] = P;
+          return true;
+        }
+        side[b] = 1;
+      }
+      if (caps[b] <= dmin + 1e-6) return false;
+      caps[b] = Math.max(dmin, caps[b] * 0.96);
+      lost.add(b);
+      parts[b] = at(b);
+      return true;
+    };
+    for (let it = 0; it < 120; it++) {
       let changed = false;
       for (const [i, j] of near) {
-        if (!tangled(parts[i], parts[j])) continue;
+        if (big[i] !== big[j]) {
+          // the neighbour gives way first (its stone, its figure, its numeral's side), then the big one
+          if (!numTangled(parts[i], parts[j])) {
+            // clear of every numeral: the neighbour's figure still shrinks to make room, the stones stay
+            if (tangled(parts[i], parts[j])) {
+              const o = big[i] ? j : i;
+              if (figK[o] > FIG_K_MIN + 1e-6) {
+                figK[o] = Math.max(FIG_K_MIN, figK[o] * 0.95);
+                parts[o] = at(o);
+                changed = true;
+              }
+            }
+            continue;
+          }
+          if (yieldTo(big[i] ? i : j, big[i] ? j : i)) {
+            changed = true;
+            continue;
+          }
+        } else if (!tangled(parts[i], parts[j])) continue;
         // the larger piece gives way (both when level); a pair at the floor stays as it is
         const k = caps[i] > caps[j] + 0.01 ? [i] : caps[j] > caps[i] + 0.01 ? [j] : [i, j];
         let moved = false;
@@ -2200,11 +2282,12 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
       if (!changed) break;
     }
     parts = TERRITORY_IDS.map((_, i) => at(i));
-    capsTangled = near.filter(([i, j]) => tangled(parts[i], parts[j])).map(([i, j]) => `${TERRITORY_IDS[i]}/${TERRITORY_IDS[j]}`);
+    capsTangled = near.filter(([i, j]) => (big[i] !== big[j] ? numTangled : tangled)(parts[i], parts[j])).map(([i, j]) => `${TERRITORY_IDS[i]}/${TERRITORY_IDS[j]}`);
     capsFloored = caps.filter((c) => c <= dmin + 1e-6).length;
     capsLowered = caps.filter((c) => c < dmax - 1e-6).length;
     capsFigSmaller = figK.filter((k) => k < FIG_K - 1e-6).length;
     capsNumLeft = side.filter((v) => v < 0).length;
+    capsLost = [...lost].map((i) => TERRITORY_IDS[i]);
     tokens.setCaps(
       new Map(TERRITORY_IDS.map((id, i) => [id, caps[i]])),
       new Map(TERRITORY_IDS.map((id, i) => [id, figK[i]])),
@@ -2238,6 +2321,7 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     // numeral inside; a smaller floor lets the crowded pieces clear each other.)
     const phoneLandNow = compact && W > H;
     tokens.dminPx = phoneLandNow ? 12.5 : compact ? 15.5 : 14;
+    tokens.numMin = compact ? NUMERAL_MIN_PHONE : NUMERAL_MIN;
     tokens.dmaxPx = compact ? 26 : 36;
     for (let it = 0; it < 3; it++) {
       setPieceExtents();
@@ -2416,6 +2500,8 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     syncTerr();
     syncLifts();
     const tokensMoving = tokens.animating;
+    // the board's three largest stacks changed: they keep their size (fitCaps)
+    if (W > 1 && bigThree().join(',') !== bigKey) fitCaps();
     tokens.setView(rig.cur.az, rig.cur.pitch);
     tokens.update();
     tray.tick(now);
@@ -2899,6 +2985,14 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     /** Pairs of pieces that still overlap with both at the 1-army floor (fitCaps). */
     get capsTangled() {
       return capsTangled;
+    },
+    /** Of the three largest stacks: those whose stone still had to give a step to keep a neighbour's numeral clear. */
+    get capsLost() {
+      return capsLost;
+    },
+    /** The three largest stacks the caps were fitted for. */
+    get capsBig() {
+      return bigKey;
     },
     /** Territories whose figure is drawn under FIG_K to clear a neighbour (after the stone floor). */
     get capsFigSmaller() {

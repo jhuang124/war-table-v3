@@ -5,6 +5,7 @@
 // beside the current seat's ring.
 import { ONE_HUMAN, check, clickBtn, clickT, finish, idle, loadScenario, open, scenario, seg, state, ui } from './lib';
 import { openDevice } from './mobile-lib';
+import { restBoard } from './board-lib';
 import type { Page } from 'playwright';
 import { PLAYER_COLORS } from '../../src/shared/palette';
 import { TERRITORY_IDS } from '../../src/engine';
@@ -203,7 +204,9 @@ await browser.close();
   const overlaps = (p: Page) =>
     p.evaluate(() => {
       type PR = { box: number[]; plaque: number[]; fig: number[] };
-      const d = (window as unknown as { __board: { __debug: { overlay: { pieceRects: (id: string) => PR | null }; tiles: { list: { id: string }[] }; capsFloored: number; capsLowered: number; capsFigSmaller: number; capsTangled: string[] } } }).__board.__debug;
+      const d = (window as unknown as { __board: { __debug: { overlay: { pieceRects: (id: string) => PR | null }; tiles: { list: { id: string }[] }; capsFloored: number; capsLowered: number; capsFigSmaller: number; capsTangled: string[]; capsBig: string; capsLost: string[] } } }).__board.__debug;
+      // the board's three largest stacks keep their size: against them only the numerals must stay clear
+      const big = new Set(d.capsBig.split(','));
       const out: string[] = [];
       const cr = (document.querySelector('canvas') as HTMLCanvasElement).getBoundingClientRect();
       const nums = new Map<string, number[]>();
@@ -236,12 +239,12 @@ await browser.close();
       for (const [id, a] of piece) {
         const up = [a[0], a[1], a[2], a[1] + Math.max(0, a[3] - a[1] - (a[2] - a[0]))];
         if (up[3] - up[1] < 1) continue;
-        for (const [o, b] of [...piece].filter(([k]) => k !== id)) {
+        for (const [o, b] of [...piece].filter(([k]) => k !== id && big.has(k) === big.has(id))) {
           const x = over(up, b);
           if (x) out.push(`${id}'s figure over ${o}'s piece (${x})`);
         }
       }
-      return { out, floored: d.capsFloored, lowered: d.capsLowered, smaller: d.capsFigSmaller, tangled: d.capsTangled };
+      return { out, floored: d.capsFloored, lowered: d.capsLowered, smaller: d.capsFigSmaller, tangled: d.capsTangled, big: d.capsBig, lost: d.capsLost };
     });
   const tall = scenario({}, { kind: 'attack' }, { fill: (_t, i) => [1 + (i % 3), 30] });
   const mixed = scenario({}, { kind: 'attack' }, { fill: (_t, i) => [1 + (i % 3), i % 2 ? 1 : 40] });
@@ -251,7 +254,9 @@ await browser.close();
     let floored = 0;
     let lowered = 0;
     let smaller = 0;
-    for (const s of [tall, mixed]) {
+    const bigs: string[] = [];
+    // (the round-6 rest board too: its three largest stacks against their neighbours)
+    for (const s of [tall, mixed, restBoard({ kind: 'attack' })]) {
       await loadScenario(ctx.page, s);
       await ctx.page.waitForTimeout(300);
       const r = await overlaps(ctx.page);
@@ -259,8 +264,51 @@ await browser.close();
       floored = r.floored;
       lowered = r.lowered;
       smaller = r.smaller;
+      bigs.push(`${r.big}${r.lost.length ? ` (gave way: ${r.lost.join(', ')})` : ''}`);
     }
-    check(bad.length === 0, `${form}: no piece (stone + figure) or numeral covers another territory's numeral or figure at home (every stone at 30 and at 1/40; ${lowered} stones held under full size to clear a neighbour, ${floored} of them at the 1-army size, ${smaller} figures drawn under 1.1 × their stone)${bad.length ? ` — ${bad.slice(0, 6).join('; ')}` : ''}`, results);
+    // the count's digit as drawn (lining figures, full height): its ivory rows, the painted board hidden for the shot
+    const want = form === '1440x900' ? 9 : 7;
+    const digits: string[] = [];
+    let minDigit = Infinity;
+    for (const id of ['peru', 'india', 'alaska', 'siberia', 'ural']) {
+      const r = await ctx.page.evaluate((id) => {
+        const b = document.querySelector<HTMLElement>(`.rb-badge[data-t="${id}"]`);
+        if (!b || b.style.visibility === 'hidden') return null;
+        (document.querySelector('canvas') as HTMLCanvasElement).style.visibility = 'hidden';
+        const n = b.querySelector('.n')!.getBoundingClientRect();
+        return { x: n.left - 2, y: n.top - 4, width: n.width + 4, height: n.height + 8, fs: getComputedStyle(b).fontSize, t: b.textContent };
+      }, id);
+      if (!r || r.x < 0 || r.y < 0) continue;
+      const png = await ctx.page.screenshot({ clip: { x: r.x, y: r.y, width: r.width, height: r.height } });
+      const h = await ctx.page.evaluate(async (b64) => {
+        const img = new Image();
+        img.src = 'data:image/png;base64,' + b64;
+        await img.decode();
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        const g = c.getContext('2d')!;
+        g.drawImage(img, 0, 0);
+        const d = g.getImageData(0, 0, c.width, c.height).data;
+        let top = -1;
+        let bot = -1;
+        for (let y = 0; y < c.height; y++)
+          for (let x = 0; x < c.width; x++) {
+            const o = (y * c.width + x) * 4;
+            if (d[o] > 200 && d[o + 1] > 195 && d[o + 2] > 180) {
+              if (top < 0) top = y;
+              bot = y;
+              break;
+            }
+          }
+        (document.querySelector('canvas') as HTMLCanvasElement).style.visibility = '';
+        return top < 0 ? 0 : (bot - top + 1) / devicePixelRatio;
+      }, png.toString('base64'));
+      minDigit = Math.min(minDigit, h);
+      digits.push(`${id} "${r.t}" ${r.fs} → ${h.toFixed(1)} px`);
+    }
+    check(digits.length >= 3 && minDigit >= want - 0.01, `${form}: every count's digit is drawn ≥ ${want} px tall (lining figures; ${digits.join(', ')})`, results);
+    check(bad.length === 0, `${form}: no piece (stone + figure) or numeral covers another territory's numeral or figure at home (every stone at 30, at 1/40, and the round-6 board; ${lowered} stones held under full size to clear a neighbour, ${floored} of them at the 1-army size, ${smaller} figures drawn under 1.1 × their stone; the three largest kept their size: ${bigs.join(' / ')})${bad.length ? ` — ${bad.slice(0, 6).join('; ')}` : ''}`, results);
     errors.push(...ctx.errors);
     await ctx.browser.close();
   }

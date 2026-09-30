@@ -4,12 +4,12 @@
 // "Territory names" setting is on). Text is laid out at its real size (no CSS scale at rest), so it stays
 // crisp at DPR 1 and 2. All writes are batched once per frame, and only when they change.
 //
-// The numbers are plain, crisp Cormorant Garamond 600 with lining, tabular figures, ivory on the stack's
-// deep-ink inlay, squashed a little so they lie on the tilted face.
+// The numbers are plain, crisp Cormorant Garamond 600 with lining, tabular figures, ivory with a 1 px halo in
+// the seat's deep ink, at full height (the board is flat: nothing squashes them onto a tilted face any more).
 import * as THREE from 'three';
 import type { TerritoryId } from '../engine/types';
 import { TERRITORY_IDS, TERRITORIES } from '../engine/mapData';
-import type { PlayerPalette } from '../shared/palette';
+import { PLAYER_COLORS, type PlayerPalette } from '../shared/palette';
 import type { BoardGeometry } from '../map/types';
 import type { TileSet } from './tiles';
 import { numeralBox, type TokenSystem } from './tokens';
@@ -23,7 +23,8 @@ const CSS = `
   box-sizing:border-box;color:#f2ede2;font:600 14px/1 ${SERIF};font-variant-numeric:lining-nums tabular-nums;font-feature-settings:'lnum' 1,'tnum' 1;
   letter-spacing:0;white-space:nowrap;will-change:transform;visibility:hidden;transition:opacity 180ms ease-out}
 .rb-ring{display:none}
-.rb-badge .n,.rb-trav .n{position:relative;display:block;transform:translateY(-.04em) scaleY(.86)}
+.rb-badge .n,.rb-trav .n{position:relative;display:block;transform:translateY(-.04em);
+  text-shadow:0 0 1px var(--halo,#0b1224),0 0 1px var(--halo,#0b1224),0 0 1.5px var(--halo,#0b1224)}
 .rb-badge.dim{opacity:.8}
 .rb-badge.ghosted{z-index:2}
 .rb-ghost{position:absolute;left:calc(100% + 2px);top:50%;transform:translateY(-54%);color:#f2ede2;
@@ -288,7 +289,9 @@ export class Overlay {
       void dg;
       void db;
       b.el.style.color = '';
-      // The ring: the seat's deep ink inside a brushed ensō, the numeral ivory (readable on any wash).
+      // The numeral: ivory with a 1 px ink halo in the seat's deep tone, so it reads over the stone's rim,
+      // the wash and the paper alike.
+      b.el.style.setProperty('--halo', `rgba(${dr},${dg},${db},0.92)`);
       b.lastInk = pal.id;
     }
     if (pop) this.pop(id);
@@ -527,11 +530,11 @@ export class Overlay {
   }
   /**
    * The numeral's font size from its height on screen (tokens.numeralSize, projected): small, at the stone's
-   * edge, never under 11 px (PLAN §1: the close read stays legible on phones) × the text size.
+   * edge, never under 13 px (the couch read, lead review 2026-09-30; phones 11: tokens.numMin) × the text size.
    */
   private numeralPx(h: number): number {
     const soft = 1 + (this._ui - 1) * 0.8;
-    return Math.max(11 * soft, Math.min(h, 22 * soft));
+    return Math.max(this.tokens.numMin * soft, Math.min(h, 22 * soft));
   }
   /** A disc's diameter on screen (px) at a base point, from its world radius. */
   private discPx(base: THREE.Vector3, r: number, camera: THREE.Camera): number {
@@ -739,7 +742,11 @@ export class Overlay {
         e.num.textContent = String(tr.n);
         e.lastD = 0;
       }
-      if (e.owner !== tr.owner) e.owner = tr.owner;
+      if (e.owner !== tr.owner) {
+        e.owner = tr.owner;
+        const pal = (PLAYER_COLORS as Record<string, PlayerPalette | undefined>)[tr.owner];
+        if (pal) e.el.style.setProperty('--halo', `rgba(${hexToRgb(pal.deep).map((c) => Math.round(c * 0.72 * 255)).join(',')},0.92)`);
+      }
       // the walking stack's numeral rides on its top face
       this.right.setFromMatrixColumn(camera.matrixWorld, 0);
       const [x, y] = this.proj(tr.figTop, camera);
