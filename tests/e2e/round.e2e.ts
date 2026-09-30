@@ -106,7 +106,10 @@ check(
 );
 const humans = turns.filter((t) => t.kind === 'human');
 check(humans.every((t) => t.forcedWaitMs === 0), `human forced wait: ${humans.map((t) => t.forcedWaitMs).join(', ')} ms`, results);
-check(humans.every((t) => t.clicks <= 4), `human clicks per quick turn: ${humans.map((t) => t.clicks).join(', ')}`, results);
+// v3: an AI's truce offer asks first (Decline / Accept): each answer is one more click on that turn, not tempo.
+const answers = (await page.evaluate(() => window.__risk.ledger())).filter((l) => /^John (turns down|accepts) /.test(l.text)).length;
+const extra = humans.reduce((a, t) => a + Math.max(0, t.clicks - 4), 0);
+check(humans.every((t) => t.clicks <= 4 + answers) && extra <= answers, `human clicks per quick turn: ${humans.map((t) => t.clicks).join(', ')} (≤ 4, plus ${answers} truce ${answers === 1 ? 'offer' : 'offers'} answered)`, results);
 check(m.cameraMovesDuringHumanInput === 0, `cameraMovesDuringHumanInput ${m.cameraMovesDuringHumanInput}`, results);
 await page.screenshot({ path: 'artifacts/e2e/round-end.png' });
 await browser.close();

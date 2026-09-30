@@ -591,7 +591,7 @@ export class BottomStrip {
   private round: HTMLSpanElement;
   private eventsKey = '';
 
-  constructor(send: (i: UiIntent) => void) {
+  constructor(private send: (i: UiIntent) => void) {
     this.el = h('section', 'strip');
     this.el.dataset.testid = 'strip';
     this.el.setAttribute('aria-label', 'Your move');
@@ -643,9 +643,28 @@ export class BottomStrip {
     this.rule.setSeed(seed);
   }
 
-  /** The ledger's last lines (oldest first) and the round, written above / beside the line. */
-  setEvents(lines: LogLineVM[] | undefined, round: number | undefined): void {
+  /**
+   * The ledger's last lines (oldest first) and the round, written above / beside the line. `updateReady`
+   * (v3): a new build has taken over; the slot reads 'Update ready · reload', two bare words a tap acts on.
+   */
+  setEvents(lines: LogLineVM[] | undefined, round: number | undefined, updateReady = false): void {
     setText(this.round, round && round > 0 ? `Round ${round}` : '');
+    if (updateReady) {
+      if (this.eventsKey === 'update') return;
+      this.eventsKey = 'update';
+      this.events.textContent = '';
+      const b = h('button', 'ev-update nofocus', 'Update ready · reload');
+      b.type = 'button';
+      b.dataset.testid = 'update-ready';
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.send({ type: 'reloadForUpdate' });
+      });
+      this.events.append(b);
+      toggle(this.events, 'hidden', false);
+      drawIn(b, 240);
+      return;
+    }
     const ls = (lines ?? []).slice(-2);
     const key = ls.map((l) => `${l.id}:${l.text}`).join('|');
     if (key === this.eventsKey) return;

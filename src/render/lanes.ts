@@ -2,7 +2,8 @@
 // hairline over the water you can see, with a short tick where it meets each shore — so "where can Ural
 // attack?" answers itself from the board. At rest the crossings are quiet (paint, printed); they brighten
 // with the selected territory, the armed attack's pair, and the hovered tile, then settle back (160 ms).
-// Wrapped lanes (Alaska–Kamchatka) run off the board's edges; only their shore ends get a tick.
+// Wrapped lanes (Alaska–Kamchatka) run off the board's edges; only their shore ends get a tick. The ticks sit
+// on the lane's two shore points (`lane.shore`, map packs), so a crossing starts and ends on the coast.
 import * as THREE from 'three';
 import type { BoardGeometry, Vec2 } from '../map/types';
 import type { TerritoryId } from '../engine/types';
@@ -92,7 +93,6 @@ export class SeaLanes {
     const side: number[] = [];
     const along: number[] = [];
     const idx: number[] = [];
-    const W = this.g.width;
     const hw = 0.75 * this.pxUnit;
     const tick = 3.6 * this.pxUnit;
     const y = TILE_TOP + 0.004;
@@ -120,22 +120,39 @@ export class SeaLanes {
       return L;
     };
     this.g.seaLanes.slice(0, 32).forEach((l, li) => {
-      for (const seg of l.segments) {
+      // The crossing starts on a's coast and ends on b's (the lane's two shore points, map packs; the
+      // loader fills them from the polyline's ends when a board omits them). A polyline end that sits
+      // near a shore point is moved onto it, so the hairline meets the coast exactly on every pack.
+      const segs = l.segments.map((seg) => seg.map((p) => [p[0], p[1]] as Vec2));
+      const shores: Vec2[] = l.shore ? [l.shore[0], l.shore[1]] : [segs[0][0], segs[segs.length - 1][segs[segs.length - 1].length - 1]];
+      const ends: { p: Vec2; q: Vec2 }[] = [];
+      for (const sh of shores) {
+        let best: { seg: Vec2[]; i: number; d: number } | null = null;
+        for (const seg of segs)
+          for (const i of [0, seg.length - 1]) {
+            const d = Math.hypot(seg[i][0] - sh[0], seg[i][1] - sh[1]);
+            if (!best || d < best.d) best = { seg, i, d };
+          }
+        if (!best || best.seg.length < 2) continue;
+        if (best.d < 1.5) best.seg[best.i] = [sh[0], sh[1]];
+        else if (best.i === 0) best.seg.unshift([sh[0], sh[1]]);
+        else best.seg.push([sh[0], sh[1]]);
+        const at = best.d < 1.5 ? best.i : best.i === 0 ? 0 : best.seg.length - 1;
+        const q = best.seg[at === 0 ? 1 : best.seg.length - 2];
+        ends.push({ p: best.seg[at], q });
+      }
+      for (const seg of segs) {
         let s = 0;
         for (let i = 1; i < seg.length; i++) s += quad(seg[i - 1], seg[i], hw, li, s);
-        // a tick across the line at each shore end (not where a wrapped lane runs off the board)
-        for (const [p, q] of [
-          [seg[0], seg[1]],
-          [seg[seg.length - 1], seg[seg.length - 2]],
-        ] as [Vec2, Vec2][]) {
-          if (p[0] < 0.6 || p[0] > W - 0.6) continue;
-          const dx = q[0] - p[0];
-          const dy = q[1] - p[1];
-          const L = Math.hypot(dx, dy) || 1;
-          const c: Vec2 = [p[0] + (dx / L) * 0.35 * tick, p[1] + (dy / L) * 0.35 * tick];
-          const n: Vec2 = [-dy / L, dx / L];
-          quad([c[0] - n[0] * tick, c[1] - n[1] * tick], [c[0] + n[0] * tick, c[1] + n[1] * tick], hw * 1.15, li, 0.2);
-        }
+      }
+      // a tick across the line at each shore point (a wrapped lane's board-edge ends have none)
+      for (const { p, q } of ends) {
+        const dx = q[0] - p[0];
+        const dy = q[1] - p[1];
+        const L = Math.hypot(dx, dy) || 1;
+        const c: Vec2 = [p[0] + (dx / L) * 0.35 * tick, p[1] + (dy / L) * 0.35 * tick];
+        const n: Vec2 = [-dy / L, dx / L];
+        quad([c[0] - n[0] * tick, c[1] - n[1] * tick], [c[0] + n[0] * tick, c[1] + n[1] * tick], hw * 1.15, li, 0.2);
       }
     });
     const geo = new THREE.BufferGeometry();

@@ -9,7 +9,7 @@
 // at most two buttons). The dice tray header, one banner, the cards sheet and the menu sheets come and go.
 
 import type { AudioEngine } from '../audio/types';
-import type { AiDifficulty, CardSymbol, ContinentId, PlayerColorId, PlayerId, PlayerKind, PlayerStats, TimelinePoint } from '../engine/types';
+import type { AiDifficulty, AiPersonality, CardSymbol, ContinentId, PlayerColorId, PlayerId, PlayerKind, PlayerStats, TimelinePoint } from '../engine/types';
 import type { ViewportInsets } from '../render/BoardView';
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,11 @@ export interface Settings {
 export interface SeatRef {
   id: PlayerId;
   name: string;
-  color: PlayerColorId; // emblem via PLAYER_COLORS[color].emblem
+  /**
+   * Emblem via PLAYER_COLORS[color].emblem. The 2-player neutral seat carries 'neutral' here at run time (v3:
+   * the controller repaints it; see SeatColorId in src/shared/palette.ts) until PlayerColorId grows the id.
+   */
+  color: PlayerColorId;
   kind: PlayerKind;
 }
 
@@ -65,6 +69,11 @@ export interface SeatDraft {
   color: PlayerColorId;
   kind: PlayerKind;
   difficulty: AiDifficulty;
+  /**
+   * Additive (v3): how an AI seat plays (src/engine/ai/personality.ts). The controller fills it for every
+   * AI seat, rotating Turtle → Opportunist → Warlord so a fresh table has three different AIs.
+   */
+  personality?: AiPersonality;
 }
 
 export interface HouseRulesDraft {
@@ -73,6 +82,35 @@ export interface HouseRulesDraft {
   fortifyRule: 'connected' | 'adjacent';
   setupBatch: number | 'auto'; // 'auto' = two passes
   seed: number | null; // null = random
+  /** Additive (v3): the 2-player neutral seat ("Neutral armies"). Default on; applies to exactly 2 seats. */
+  neutral?: boolean;
+  /**
+   * Additive (v3): "Truces" — config.diplomacy. Default on; it only switches diplomacy on when the table has
+   * at least one human and one AI with a personality.
+   */
+  truces?: boolean;
+}
+
+/** Additive (v3): one map pack in the New game picker (src/map/registry.ts listMaps). */
+export interface MapOptionVM {
+  id: string;
+  name: string;
+  /** One plain line. */
+  description: string;
+  /** '2–4 players'. */
+  seats: string;
+  /** Preview image URL, or null. */
+  thumbnail: string | null;
+  /** The table's seat count is outside the map's range. */
+  disabled: boolean;
+}
+
+/** Additive (v3): an AI personality as the seat picker offers it. */
+export interface PersonalityOptionVM {
+  id: AiPersonality;
+  name: string;
+  /** One plain line (the hover title, and the small text under the chosen one). */
+  line: string;
 }
 
 export interface NewGameVM {
@@ -88,6 +126,15 @@ export interface NewGameVM {
   problems: string[]; // e.g. 'Two seats share Cobalt'
   canAddSeat: boolean;
   canRemoveSeat: boolean;
+  /** Additive (v3): the map picker, in registry order, and the picked map's id. */
+  maps?: MapOptionVM[];
+  mapId?: string;
+  /** Additive (v3): the three AI personalities (Turtle · Opportunist · Warlord). */
+  personalities?: PersonalityOptionVM[];
+  /** Additive (v3): the Neutral armies rule applies (exactly 2 seats). */
+  neutralApplies?: boolean;
+  /** Additive (v3): the Truces rule applies (a human and a personality AI at the table). */
+  trucesApply?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +162,23 @@ export interface SeatChipVM {
   cards?: number;
   /** Additive (v3): the continents this seat holds whole, CONTINENT_IDS order. */
   continents?: ContinentId[];
+  /**
+   * Additive (v3 AI): the 2-player neutral seat. Its ring keeps its territory count; no name underline,
+   * never the cup, drawn dimmed.
+   */
+  neutral?: boolean;
+  /** Additive (v3 AI): an AI seat's personality, 'Turtle' / 'Opportunist' / 'Warlord', and its one line. */
+  personality?: { name: string; line: string } | null;
+  /**
+   * Additive (v3 AI): the seat this AI holds its strongest grudge against, when that grudge is ≥ 2 (a short
+   * brush tick in that seat's colour under the ring, 'Holds a grudge against Sam'). null = none worth showing.
+   */
+  grudge?: SeatRef | null;
+  /**
+   * Additive (v3 diplomacy): the driver is choosing whom to offer a truce, and this seat can take one: its
+   * ring is lit and a tap proposes (UiIntent 'proposeTruce').
+   */
+  truceTarget?: boolean;
 }
 
 /**
@@ -162,7 +226,11 @@ export type ButtonId =
   | 'roll'
   | 'move' // 'Move 8' (occupy) / 'Move 5 · end turn' (fortify)
   | 'watchAis' // all humans out: 'Watch to the end'
-  | 'callGame'; // all humans out: 'End game'
+  | 'callGame' // all humans out: 'End game'
+  // Additive (v3 diplomacy):
+  | 'truce' // 'Truce': the secondary word in Attack; lights the seats a truce can be offered to
+  | 'acceptTruce' // 'Accept': a pending offer to the driver (the gold, in its brush ring)
+  | 'declineTruce'; // 'Decline': bare
 
 export interface ButtonVM {
   id: ButtonId;
@@ -245,7 +313,8 @@ export interface LogLineVM {
   id: number;
   round: number;
   seat: SeatRef | null;
-  kind: 'engagement' | 'turn' | 'recap' | 'card' | 'continent' | 'elimination' | 'system';
+  /** 'truce' (v3, additive): a diplomacy event's sentence (truceSentence). */
+  kind: 'engagement' | 'turn' | 'recap' | 'card' | 'continent' | 'elimination' | 'system' | 'truce';
   text: string; // 'Cobalt blitzed Siam from India: 9 vs 3 → took it, lost 2'
 }
 
@@ -301,6 +370,11 @@ export interface GameVM {
   round?: number;
   /** Additive (v3, PLAN §3): the ledger's last lines, oldest first (the dock's event line: the latest, and on desktop the one before it). */
   events?: LogLineVM[];
+  /**
+   * Additive (v3): a new build has taken over (the service worker's controllerchange) while a game is on.
+   * The event line reads 'Update ready · reload' instead of the ledger; a tap sends 'reloadForUpdate'.
+   */
+  updateReady?: boolean;
   banner: BannerVM | null;
   handoff: { seat: SeatRef; subline: string } | null; // 'Pass to Sam' cover
   confirm: { kind: 'endGame' | 'restart'; text: string } | null;
@@ -387,6 +461,8 @@ export type UiIntent =
   | { type: 'length'; value: LengthPreset }
   | { type: 'setup'; value: SetupPreset }
   | { type: 'house'; patch: Partial<HouseRulesDraft> }
+  /** Additive (v3): pick a map pack. */
+  | { type: 'map'; id: string }
   | { type: 'start' }
   // in game
   | { type: 'button'; id: ButtonId }
@@ -404,6 +480,10 @@ export type UiIntent =
   | { type: 'saveAndQuit' }
   /** Hand a seat to the AI or back, applied at the next safe point. */
   | { type: 'setController'; player: PlayerId; kind: PlayerKind; difficulty?: AiDifficulty }
+  /** Additive (v3 diplomacy): offer `to` a 3-round no-attack truce (a lit seat ring was tapped). */
+  | { type: 'proposeTruce'; to: PlayerId }
+  /** Additive (v3): the event line's 'Update ready · reload': save and reload onto the new build. */
+  | { type: 'reloadForUpdate' }
   // victory
   | { type: 'rematch' }
   // settings

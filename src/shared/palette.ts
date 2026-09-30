@@ -23,10 +23,17 @@
 import type { PlayerColorId } from '../engine/types';
 import { brushMark } from './enso';
 
-export type SeatEmblem = 'triangle' | 'circle' | 'square' | 'diamond' | 'star' | 'cross';
+export type SeatEmblem = 'triangle' | 'circle' | 'square' | 'diamond' | 'star' | 'cross' | 'dash';
+
+/**
+ * A seat's colour: one of the six a player can pick, or 'neutral' (v3, additive): the 2-player neutral
+ * seat's muted grey wash. The engine still deals that seat one of the six ids; the controller repaints it
+ * 'neutral' (src/game/controller.ts paintNeutral) until PlayerColorId itself grows the id.
+ */
+export type SeatColorId = PlayerColorId | 'neutral';
 
 export interface PlayerPalette {
-  id: PlayerColorId;
+  id: SeatColorId;
   /** Shape shown wherever the seat appears (seat ring, roster, dice tray) — color-blind backup. */
   emblem: SeatEmblem;
   name: string;
@@ -39,16 +46,21 @@ export interface PlayerPalette {
 /** The ivory the figures, pips and marks are drawn in, on every wash. */
 const IVORY_INK = '#f2ede2';
 
-export const PLAYER_COLORS: Record<PlayerColorId, PlayerPalette> = {
+export const PLAYER_COLORS: Record<SeatColorId, PlayerPalette> = {
   crimson: { id: 'crimson', emblem: 'triangle', name: 'Vermilion', base: '#a15f4d', deep: '#6a3f33', light: '#c39b8c', ink: IVORY_INK },
   cobalt: { id: 'cobalt', emblem: 'circle', name: 'Slate', base: '#4f6e96', deep: '#344963', light: '#93a3b6', ink: IVORY_INK },
   emerald: { id: 'emerald', emblem: 'square', name: 'Sage', base: '#818e75', deep: '#555e4d', light: '#b0b6a3', ink: IVORY_INK },
   amber: { id: 'amber', emblem: 'diamond', name: 'Ochre', base: '#b7935b', deep: '#79613c', light: '#d0b994', ink: IVORY_INK },
   violet: { id: 'violet', emblem: 'star', name: 'Wisteria', base: '#9f95bb', deep: '#69627b', light: '#c2bacb', ink: IVORY_INK },
   rose: { id: 'rose', emblem: 'cross', name: 'Plum', base: '#704156', deep: '#4a2b39', light: '#a78991', ink: IVORY_INK },
+  // v3 (additive): the 2-player neutral seat. A muted grey wash, never pickable; ΔE ≥ 9.8 against all six
+  // in every vision, raw and washed (tests/e2e/palette-check.ts prints the neutral line). The brief's #6f7278 fell
+  // to 9.19 against Sage (tritan, washed); two steps darker (#6d7076) clears it at 9.83 (vs Plum, deutan, washed).
+  neutral: { id: 'neutral', emblem: 'dash', name: 'Neutral', base: '#6d7076', deep: '#484a4e', light: '#a3a6ab', ink: IVORY_INK },
 };
 
-export const PLAYER_COLOR_IDS = Object.keys(PLAYER_COLORS) as PlayerColorId[];
+/** The six colours a seat can pick, in picker order (the neutral grey is not one of them). */
+export const PLAYER_COLOR_IDS: PlayerColorId[] = ['crimson', 'cobalt', 'emerald', 'amber', 'violet', 'rose'];
 
 /** Default colors for seats 1-4 (docs/ROUND2.md §E): Vermilion, Slate, Ochre, Sage (worst pair ΔE 10.27). */
 export const DEFAULT_SEAT_COLORS: PlayerColorId[] = ['crimson', 'cobalt', 'amber', 'emerald'];
@@ -76,6 +88,7 @@ export const EMBLEM_PATHS: Record<SeatEmblem, string> = {
   diamond: brushMark([[12, 2.4], [21.6, 12], [12, 21.6], [2.4, 12]], { seed: 14, width: 3, closed: true }),
   star: brushMark(star, { seed: 15, width: 2.5, closed: true, samples: 96 }),
   cross: brushMark([[12, 3], [12, 21]], { seed: 16, width: 3.4 }) + brushMark([[3, 12.2], [21, 11.8]], { seed: 17, width: 3.4 }),
+  dash: brushMark([[4.5, 12.4], [19.5, 11.6]], { seed: 18, width: 3.2 }),
 };
 
 /** Neutral wash for unclaimed territories during a draft: bare paper-toned ivory, dimmed. */
