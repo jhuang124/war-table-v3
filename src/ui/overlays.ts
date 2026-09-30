@@ -4,6 +4,7 @@
 // top and the title sitting on it, items as words with room between them; focus is a gold hairline
 // underline. No radius, no box round a control. Phones: bottom sheets (the same paper, rising).
 
+import { cupSvg } from './hud/cup';
 import type { GameVM, LogLineVM, SeatRef, Settings, UiIntent, ViewModel } from '../game/viewModel';
 
 import { PLAYER_COLORS } from '../shared/palette';
@@ -29,6 +30,7 @@ export class Handoff {
   private seat: SeatRef | null = null;
   private vmRef: GameVM['handoff'] = null;
   private box: HTMLDivElement;
+  private cupEl!: HTMLDivElement;
 
   constructor(send: Send) {
     this.el = h('div', 'handoff hidden');
@@ -41,7 +43,9 @@ export class Handoff {
     this.box = box;
     this.emb = h('div', 'ho-emb');
     this.ring = ensoEl(1, 'enso', { drawable: true });
-    this.emb.append(this.ring);
+    // the cup, lacquered in the next seat's colour, inside their ring (PLAN §2: "Pass the cup to Sam")
+    this.cupEl = h('div', 'ho-cup');
+    this.emb.append(this.ring, this.cupEl);
     this.title = h('h1', 'ho-title');
     this.sub = h('p', 'ho-sub num');
     // The words `I'm Sam · start turn` inside a gold brush ring: the cover's own gold (GoldVM 'handoff').
@@ -80,7 +84,8 @@ export class Handoff {
     setEnso(this.ring, hashSeed(`${vm.seat.id}:${vm.seat.color}`), { drawable: true });
     if (!was || prevId !== vm.seat.id) drawEnso(this.ring, 700);
     this.title.textContent = '';
-    this.title.append(titleText(`Pass to ${vm.seat.name}`));
+    this.title.append(titleText(`Pass the cup to ${vm.seat.name}`));
+    this.cupEl.innerHTML = cupSvg(vm.seat.color);
     setText(this.sub, vm.subline);
     setText(this.btnLabel, `I'm ${vm.seat.name} · start turn`);
   }
@@ -264,20 +269,27 @@ function die(v: number, lost: boolean): HTMLElement {
   return s;
 }
 
+/**
+ * The ledger (v3, _claude/v3/PLAN.md §3): the game's sentences as an ink scroll, by round, the newest round
+ * first and open, the older rounds folded (a tap on a round's heading opens or folds it). Two taps away
+ * (menu, Ledger) or one (the event line above the dock). It later feeds the "war in ink" victory.
+ */
 class LogSheet {
   readonly el: HTMLDivElement;
   private list: HTMLDivElement;
   private empty: HTMLDivElement;
   private lines: LogLineVM[] | null = null;
+  /** Rounds the reader opened or folded by hand (round → open). */
+  private opened = new Map<number, boolean>();
   head!: HTMLDivElement;
 
   constructor(back: () => void) {
     this.el = h('div', 'sheet log-sheet');
     this.el.append(grabHandle());
     const head = h('div', 'sheet-head');
-    head.append(h('h1', 'sheet-title', 'Log'), uiButton('Close', 'role-exit', back, undefined, 'log-close'));
+    head.append(h('h1', 'sheet-title', 'Ledger'), uiButton('Close', 'role-exit', back, undefined, 'log-close'));
     this.list = h('div', 'log-list');
-    this.empty = h('div', 'log-empty', 'Nothing yet. Battles show up here, one line each.');
+    this.empty = h('div', 'log-empty', 'Nothing yet. Every move of the game is written here, round by round.');
     this.el.append(head, this.list, this.empty);
     this.head = head;
   }
@@ -286,15 +298,43 @@ class LogSheet {
     if (lines === this.lines) return;
     this.lines = lines;
     this.list.textContent = '';
-    // Newest first.
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const l = lines[i];
-      const row = h('div', `log-line kind-${l.kind}`);
-      const emb = h('span', 'log-emb');
-      if (l.seat) emb.append(emblem(l.seat.color));
-      row.append(emb, h('span', 'log-text', minus(l.text)), h('span', 'log-round num', l.round > 0 ? `round ${l.round}` : ''));
-      this.list.append(row);
+    const byRound = new Map<number, LogLineVM[]>();
+    for (const l of lines) {
+      const r = Math.max(0, l.round);
+      if (!byRound.has(r)) byRound.set(r, []);
+      byRound.get(r)!.push(l);
     }
+    const rounds = [...byRound.keys()].sort((x, y) => y - x);
+    rounds.forEach((r, i) => {
+      const sec = h('section', 'lg-round');
+      sec.dataset.round = String(r);
+      const ls = byRound.get(r)!;
+      const btn = h('button', 'lg-head nofocus');
+      btn.type = 'button';
+      btn.dataset.testid = `ledger-round-${r}`;
+      btn.append(h('span', 'lg-r', r > 0 ? `Round ${r}` : 'The deal'), h('span', 'lg-n num', `${ls.length} ${ls.length === 1 ? 'line' : 'lines'}`));
+      const body = h('div', 'lg-lines');
+      // newest first within the round too
+      for (let k = ls.length - 1; k >= 0; k--) {
+        const l = ls[k];
+        const row = h('div', `log-line kind-${l.kind}`);
+        const emb = h('span', 'log-emb');
+        if (l.seat) emb.append(emblem(l.seat.color));
+        row.append(emb, h('span', 'log-text', minus(l.text)));
+        body.append(row);
+      }
+      const open = this.opened.get(r) ?? i === 0;
+      toggle(sec, 'closed', !open);
+      btn.setAttribute('aria-expanded', String(open));
+      btn.addEventListener('click', () => {
+        const now = sec.classList.contains('closed');
+        this.opened.set(r, now);
+        toggle(sec, 'closed', !now);
+        btn.setAttribute('aria-expanded', String(now));
+      });
+      sec.append(btn, body);
+      this.list.append(sec);
+    });
     toggle(this.empty, 'hidden', lines.length > 0);
     this.list.scrollTop = 0;
   }
@@ -340,7 +380,7 @@ export class Overlays {
       uiButton('Resume', 'menu-item resume', () => send({ type: 'overlay', overlay: null }), undefined, 'pause-resume'),
       uiButton('How to play', 'menu-item', () => send({ type: 'overlay', overlay: 'rules' }), undefined, 'pause-rules'),
       uiButton('Settings', 'menu-item', () => send({ type: 'overlay', overlay: 'settings' }), undefined, 'pause-settings'),
-      uiButton('Log', 'menu-item', () => send({ type: 'overlay', overlay: 'log' }), undefined, 'pause-log'),
+      uiButton('Ledger', 'menu-item', () => send({ type: 'overlay', overlay: 'log' }), undefined, 'pause-log'),
       uiButton('Save & quit', 'menu-item', () => send({ type: 'saveAndQuit' }), undefined, 'pause-quit'),
       h('div', 'menu-sep'),
       uiButton('End game now', 'menu-item quiet', () => send({ type: 'endGameNow' }), undefined, 'pause-endgame'),
@@ -399,7 +439,7 @@ export class Overlays {
     const sw: Record<string, Switch> = {
       showLabels: new Switch('Territory names', (v) => set({ showLabels: v }), 'On every tile, not just the one you point at', 'set-labels'),
       showWinChance: new Switch('Show win chance', (v) => set({ showWinChance: v }), 'Otherwise a word: likely, coin flip…'),
-      hideCardsBetweenTurns: new Switch('Hide cards between turns', (v) => set({ hideCardsBetweenTurns: v }), 'A pass-the-laptop cover when 2+ humans play'),
+      hideCardsBetweenTurns: new Switch('Hide cards between turns', (v) => set({ hideCardsBetweenTurns: v }), 'Pass the cup: a cover between turns when 2+ humans play'),
       music: new Switch('Ambient score', (v) => set({ music: v }), 'A soft score under the game', 'set-music'),
       muted: new Switch('Mute all sound', (v) => set({ muted: v })),
       ambient: new Switch('Drifting board', (v) => set({ ambient: v }), 'Mist and ink move slowly while nobody plays', 'set-ambient'),
@@ -498,6 +538,8 @@ export class Overlays {
     this.dragged = false;
     if (!this.leaving) toggle(this.el, 'hidden', !o);
     toggle(this.el, 'over-menu', vm.screen !== 'game');
+    // The ledger is ink on the paper: the board dims behind it, it never frosts (v3 review).
+    toggle(this.el, 'is-ledger', o === 'log');
     for (const [k, el] of Object.entries(sheets)) {
       if (el === this.leaving) {
         setAttr(el, 'data-testid', null);

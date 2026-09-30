@@ -3,11 +3,20 @@
 // menu, with the words `Reset view` beside it only while the camera is off home.
 //   (11) John   (9) Sam   (8) Ochre   ( ) Sage                                   Reset view   (ensō)
 // The current seat's ring is inked at full strength and its name underlined in a hairline; the others
-// stay quieter. Losing a territory dims your ring for 300 ms (A5). An eliminated seat's ring is empty
-// and faintly cracked, and says who did it. No card counts here: the current human's hand is `Cards N`.
+// stay quieter. Losing a territory dims your ring for 300 ms (A5). An eliminated seat's ring dries out
+// over a breath (v3 "the exhale"), is empty and faintly cracked, and says who did it.
+// v3 (_claude/v3/PLAN.md §2–3, John 2026-09-30 "fuller, not busier"): under each ring, one short brush tick
+// per continent the seat holds, in that continent's printed tint (the colour its name is printed in on the
+// board), and the seat's card count; the turned-wood cup sits on the paper beside the current seat's ring
+// and slides to the next seat when the turn passes (cup.ts). The ring keeps one numeral, territories: the
+// win condition counts them, and a second numeral per seat read as clutter; the army read is the board's
+// stack heights (the seat's total is in its label for screen readers).
 
 import type { SeatChipVM, UiIntent } from '../../game/viewModel';
-import { PLAYER_COLORS } from '../../shared/palette';
+import { PLAYER_COLORS, continentInk } from '../../shared/palette';
+import { CONTINENT_IDS, CONTINENTS } from '../../engine/mapData';
+import { brushMark } from '../../shared/enso';
+import { Cup } from './cup';
 import { drawIn, emblem, ensoEl, h, hashSeed, motion, pop, setEmblem, setEnso, setStyle, setText, toggle } from '../dom';
 
 class Chip {
@@ -18,6 +27,8 @@ class Chip {
   private name: HTMLSpanElement;
   private terr: HTMLSpanElement;
   private by: HTMLSpanElement;
+  private marks: HTMLSpanElement;
+  private marksKey = '';
   private vm: SeatChipVM | null = null;
 
   constructor() {
@@ -26,6 +37,9 @@ class Chip {
     this.mark = ensoEl(1, 'sc-enso', { small: true });
     this.terr = h('span', 'sc-terr num');
     this.ring.append(this.mark, this.terr, h('i', 'sc-crack'));
+    this.marks = h('span', 'sc-marks');
+    const col = h('span', 'sc-col');
+    col.append(this.ring, this.marks);
     const text = h('span', 'sc-text');
     this.emb = emblem('crimson', 'emb sc-emb');
     this.name = h('span', 'sc-name');
@@ -33,7 +47,7 @@ class Chip {
     const nm = h('span', 'sc-nameline');
     nm.append(this.emb, this.name);
     text.append(nm, this.by);
-    this.el.append(this.ring, text);
+    this.el.append(col, text);
   }
 
   update(vm: SeatChipVM): void {
@@ -53,9 +67,13 @@ class Chip {
     toggle(this.by, 'hidden', !out);
     if (out) setText(this.by, `taken by ${out.by.name}`);
     this.el.dataset.testid = `seat-${vm.seat.id}`;
+    this.updateMarks(vm);
+    const held = (vm.continents ?? []).map((c) => CONTINENTS[c].name);
     this.el.setAttribute(
       'aria-label',
-      vm.eliminated ? `${vm.seat.name}, out${out ? `, taken by ${out.by.name}` : ''}` : `${vm.seat.name}: ${vm.territories} territories`,
+      vm.eliminated
+        ? `${vm.seat.name}, out${out ? `, taken by ${out.by.name}` : ''}`
+        : `${vm.seat.name}: ${vm.territories} territories${vm.armies !== undefined ? `, ${vm.armies} armies` : ''}${held.length ? `, holds ${held.join(' and ')}` : ''}${vm.cards ? `, ${vm.cards} ${vm.cards === 1 ? 'card' : 'cards'}` : ''}`,
     );
     if (!prev) return;
     // Turn start (INK B4 "seat ring inks"): the ring is brushed in fresh ivory ink and dries into its wash
@@ -70,8 +88,44 @@ class Chip {
     // A5: your colour is eaten — the ring dims for 300 ms each time a territory goes.
     if ((vm.lostKey ?? 0) !== (prev.lostKey ?? 0) && !motion.reduced && typeof this.ring.animate === 'function')
       this.ring.animate([{ opacity: 1 }, { opacity: 0.3, offset: 0.35 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' });
-    if (vm.eliminated && !prev.eliminated && typeof this.el.animate === 'function')
-      this.el.animate([{ opacity: 1 }, { opacity: 0.2 }, { opacity: 1 }], { duration: motion.reduced ? 150 : 900, easing: 'ease-in-out' });
+    // The exhale (PLAN §3): the knocked-out seat's ring dries out over a breath (~1.2 s) and stays dry.
+    if (vm.eliminated && !prev.eliminated && typeof this.ring.animate === 'function')
+      this.ring.animate([{ opacity: 1, filter: 'saturate(1)' }, { opacity: 0.4, filter: 'saturate(0.2)' }], { duration: motion.reduced ? 150 : 1200, easing: 'cubic-bezier(0.3, 0, 0.4, 1)' });
+  }
+
+  /** Under the ring: a tick per held continent (in its printed tint), then the card count. */
+  private updateMarks(vm: SeatChipVM): void {
+    const conts = vm.eliminated ? [] : (vm.continents ?? []);
+    const cards = vm.eliminated ? 0 : (vm.cards ?? 0);
+    const key = `${conts.join(',')}|${cards}`;
+    if (key === this.marksKey) return;
+    this.marksKey = key;
+    this.marks.textContent = '';
+    for (const c of conts) {
+      const i = CONTINENT_IDS.indexOf(c);
+      const t = h('span', 'sc-tick');
+      t.dataset.continent = c;
+      t.title = `Holds ${CONTINENTS[c].name}`;
+      t.style.color = continentInk(i, 0.4);
+      t.innerHTML = `<svg viewBox="0 0 6 12" aria-hidden="true"><path d="${brushMark([[3.3, 0.9], [2.7, 11.1]], { seed: 31 + i * 7, width: 3 })}" fill="currentColor"/></svg>`;
+      this.marks.append(t);
+    }
+    if (cards > 0) {
+      const k = h('span', 'sc-cards num');
+      k.dataset.testid = `seat-cards-${vm.seat.id}`;
+      k.title = `${cards} ${cards === 1 ? 'card' : 'cards'}`;
+      // a card in ink (square corners: no rounded rectangles anywhere): its face, a border, a hairline inside
+      k.innerHTML = `<svg viewBox="0 0 8 11" aria-hidden="true"><path d="M0.7 0.7 L7.3 0.6 L7.4 10.4 L0.6 10.4 Z" fill="currentColor" fill-opacity="0.16" stroke="currentColor" stroke-width="0.9"/><path d="M2 2 L6 2 L6 9 L2 9 Z" fill="none" stroke="currentColor" stroke-width="0.45" opacity="0.6"/></svg>`;
+      k.append(document.createTextNode(String(cards)));
+      this.marks.append(k);
+    }
+    toggle(this.marks, 'empty', !this.marks.childElementCount);
+  }
+
+  /** Where the cup sits beside this seat's ring (in the seats row's box): its slot, left of the ring. */
+  cupSpot(): { x: number; y: number } {
+    const col = this.ring.parentElement as HTMLElement;
+    return { x: this.el.offsetLeft + col.offsetLeft - 2, y: this.el.offsetTop + col.offsetTop + this.ring.offsetHeight - 2 };
   }
 }
 
@@ -83,6 +137,8 @@ export class TopStrip {
   private menuMark: SVGSVGElement;
   private vm: SeatChipVM[] | null = null;
   private moved = false;
+  private cup = new Cup();
+  private cupSeat = -1;
 
   constructor(send: (i: UiIntent) => void) {
     this.el = h('header', 'topstrip');
@@ -104,6 +160,8 @@ export class TopStrip {
     menu.addEventListener('click', () => send({ type: 'overlay', overlay: 'pause' }));
     right.append(this.reset, menu);
     this.el.append(this.seats, right);
+    this.seats.append(this.cup.el);
+    new ResizeObserver(() => this.placeCup(true)).observe(this.seats);
   }
 
   /** The game's ensō (seed = the game's seed) is the menu mark. */
@@ -121,6 +179,27 @@ export class TopStrip {
     }
     while (this.chips.length > vm.length) this.chips.pop()!.el.remove();
     vm.forEach((c, i) => this.chips[i].update(c));
+    this.placeCup(false);
+  }
+
+  /** The cup goes to the current seat: a slide when the turn passes, a cut on layout. */
+  private placeCup(cut: boolean): void {
+    const vm = this.vm;
+    if (!vm) return;
+    const i = vm.findIndex((c) => c.current);
+    toggle(this.cup.el, 'hidden', i < 0);
+    if (i < 0) return;
+    const chip = this.chips[i];
+    if (!chip || chip.el.offsetParent === null) return;
+    const p = chip.cupSpot();
+    const changed = i !== this.cupSeat;
+    this.cupSeat = i;
+    this.cup.moveTo(p.x, p.y, cut || !changed);
+  }
+
+  /** A roll starts: the cup tips and the dice pour toward the ink ring (client px). */
+  pour(to: { x: number; y: number } | null): void {
+    this.cup.pour(to, 3);
   }
 
   /** `Reset view` beside the ensō, only while the camera is off home. */

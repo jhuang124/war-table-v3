@@ -3,12 +3,13 @@
 //
 // - `ink`   RGBA, 4096×~2028 (2048 on phones), board rect: R = coastlines as dry brush (multi-pass bristle
 //           ribbons with noise-modulated width and dry gaps), G = interior borders (thinner; drawn at 40 %
-//           by the shaders), B = sea lanes as ink dabs and the decorative (non-playable) coasts.
+//           by the shaders), B = the decorative (non-playable) coasts.
 // - `field` RGBA, half the ink resolution: R = proximity to the territory's own border (1 at the border → 0
 //           ~1.2 units inside; drives edge darkening and the selection rims), G = distance from land over
 //           the sea (0 at the coast → 1 at 4 units; drives the coast feather and the mist), B = territory
 //           index (1..42; over the sea: the nearest coast's, within ~1.5 units; read with texelFetch),
 //           A = land coverage.
+// - `cont`  RGBA at field resolution: the printed continents (v3; buildContinents).
 // - `noise` a small tileable fbm texture (4 channels) the shaders use for mist, mottling and breathing,
 //           instead of evaluating fbm per pixel.
 // - `waves` an atlas of calligraphic wave strokes (the board places 6–8 of them per game, seeded).
@@ -24,6 +25,8 @@ import { loadStreaks, loadTexMaps, type StreakData, type TexMaps } from './texma
 export interface InkLayer {
   ink: THREE.DataTexture;
   field: THREE.DataTexture;
+  /** The printed continents (v3): R outline distance, G own continent (255 = open sea), B the outline's continent. */
+  cont: THREE.DataTexture;
   noise: THREE.DataTexture;
   waves: THREE.CanvasTexture;
   /** Number of wave variants stacked vertically in `waves`. */
@@ -599,6 +602,136 @@ function edt1d(f: Float64Array, n: number, d: Float64Array, arg: Int32Array, v: 
   }
 }
 
+/** 2-D Euclidean distance transform (px) to the `feature` pixels, with the nearest feature's index. */
+function edt2d(feature: Uint8Array, W: number, H: number): { dist: Float32Array; near: Int32Array } {
+  const N = W * H;
+  const d1 = new Float64Array(N);
+  const ny = new Int32Array(N);
+  {
+    const f = new Float64Array(H);
+    const d = new Float64Array(H);
+    const arg = new Int32Array(H);
+    const v = new Int32Array(H);
+    const z = new Float64Array(H + 1);
+    for (let x = 0; x < W; x++) {
+      for (let y = 0; y < H; y++) f[y] = feature[y * W + x] ? 0 : 1e20;
+      edt1d(f, H, d, arg, v, z);
+      for (let y = 0; y < H; y++) {
+        d1[y * W + x] = d[y];
+        ny[y * W + x] = arg[y];
+      }
+    }
+  }
+  const dist = new Float32Array(N);
+  const near = new Int32Array(N);
+  {
+    const f = new Float64Array(W);
+    const d = new Float64Array(W);
+    const arg = new Int32Array(W);
+    const v = new Int32Array(W);
+    const z = new Float64Array(W + 1);
+    for (let y = 0; y < H; y++) {
+      const base = y * W;
+      for (let x = 0; x < W; x++) f[x] = d1[base + x];
+      edt1d(f, W, d, arg, v, z);
+      for (let x = 0; x < W; x++) {
+        dist[base + x] = Math.sqrt(d[x]);
+        const ax = arg[x];
+        near[base + x] = ny[base + ax] * W + ax;
+      }
+    }
+  }
+  return { dist, near };
+}
+
+/** How far out from its coasts a continent's printed region reaches, board units. */
+export const CONT_HALO = 0.45;
+/** The closing's reach (board units): gaps under twice this between a continent's coasts are filled. */
+export const CONT_REACH = 2.1;
+/** The outline distance channel's range, board units (R = 1 at and past it). */
+export const CONT_DR = 1.2;
+
+/** The printed continents' field (see buildInk): outline distance, own continent, the outline's continent. */
+async function buildContinents(ids: Uint8Array, W: number, H: number, sF: number, contOf: Uint8Array, DECOR: number): Promise<THREE.DataTexture> {
+  const N = W * H;
+  // nearest playable land for every texel (decorative land counts as sea: the halo runs over it)
+  const land = new Uint8Array(N);
+  for (let i = 0; i < N; i++) land[i] = ids[i] && ids[i] !== DECOR ? 1 : 0;
+  const A = edt2d(land, W, H);
+  await yieldFrame();
+  // The region is smoothed like a printed zone (a morphological closing): grow CONT_REACH out from the land,
+  // then shrink back to CONT_HALO, so bays, inlets and archipelagos fill in and the line runs in long,
+  // calm curves instead of tracing every inlet.
+  const reach = CONT_REACH * sF;
+  const outside = new Uint8Array(N);
+  for (let i = 0; i < N; i++) outside[i] = A.dist[i] > reach ? 1 : 0;
+  const O = edt2d(outside, W, H);
+  await yieldFrame();
+  const shrink = (CONT_REACH - CONT_HALO) * sF;
+  const cont = new Uint8Array(N).fill(255);
+  for (let i = 0; i < N; i++) if (O.dist[i] > shrink) cont[i] = contOf[ids[A.near[i]]] ?? 255;
+  // Small enclosed pools of open sea (the Arabian Sea's pocket between Africa and Asia's halos) are printed
+  // over too: a ring of outline round a puddle reads as a mark, not a sea.
+  {
+    const maxPool = 36 * sF * sF;
+    const seen = new Uint8Array(N);
+    const stack: number[] = [];
+    const comp: number[] = [];
+    for (let s0 = 0; s0 < N; s0++) {
+      if (seen[s0] || cont[s0] !== 255) continue;
+      comp.length = 0;
+      let edge = false;
+      stack.push(s0);
+      seen[s0] = 1;
+      while (stack.length) {
+        const i = stack.pop()!;
+        comp.push(i);
+        const x = i % W;
+        const y = (i - x) / W;
+        if (x === 0 || y === 0 || x === W - 1 || y === H - 1) edge = true;
+        const nb = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1];
+        for (const j of nb)
+          if (j >= 0 && !seen[j] && cont[j] === 255) {
+            seen[j] = 1;
+            stack.push(j);
+          }
+      }
+      if (!edge && comp.length < maxPool) for (const i of comp) cont[i] = contOf[ids[A.near[i]]] ?? 255;
+    }
+  }
+  // outline texels: inside a region, next to another region or open sea (or the board's edge: every
+  // printed region is closed)
+  const line = new Uint8Array(N);
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const c = cont[i];
+      if (c === 255) continue;
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) line[i] = 1;
+      else if (cont[i - 1] !== c || cont[i + 1] !== c || cont[i - W] !== c || cont[i + W] !== c) line[i] = 1;
+    }
+  const B = edt2d(line, W, H);
+  await yieldFrame();
+  const out = new Uint8Array(N * 4);
+  const dr = CONT_DR * sF;
+  for (let i = 0; i < N; i++) {
+    const o = i * 4;
+    // the outline texels sit on the inner side of the boundary: centre the line on it (half a texel out)
+    const d = Math.max(0, B.dist[i] + (cont[i] === 255 ? -0.5 : 0.5));
+    out[o] = Math.round(255 * Math.min(1, d / dr));
+    out[o + 1] = cont[i];
+    out[o + 2] = cont[B.near[i]];
+    out[o + 3] = 255;
+  }
+  const t = new THREE.DataTexture(out, W, H, THREE.RGBAFormat, THREE.UnsignedByteType);
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearFilter;
+  t.generateMipmaps = false;
+  t.flipY = false;
+  t.needsUpdate = true;
+  return t;
+}
+
 // ---------------------------------------------------------------------------
 // build
 // ---------------------------------------------------------------------------
@@ -737,6 +870,15 @@ export async function buildInk(g: BoardGeometry, opt: InkOptions): Promise<InkLa
   fieldTex.flipY = false;
   fieldTex.needsUpdate = true;
   await yieldFrame();
+
+  // --- printed continents (_claude/v3/PLAN.md §2) -------------------------------------------------------
+  // Each continent is a printed region: its own land plus a halo of sea CONT_HALO units out from its coasts
+  // (so its islands sit inside it), faintly tinted, bounded by one heavy line. Where two halos meet (a
+  // strait) and where two continents share a land border, the line is the boundary between them.
+  // `cont` RGBA at field resolution: R = distance to the nearest outline (0 → 1 over CONT_DR units; linear, so
+  // the shaders draw a smooth line of any weight), G = the continent this texel belongs to (land or halo;
+  // 255 = open sea), B = the continent the nearest outline belongs to (a held one takes its holder's ink).
+  const contTex = await buildContinents(ids, fieldW, fieldH, sF, contOf, DECOR);
 
   // --- ink canvas -------------------------------------------------------------------------------------
   const s = inkW / BW;
@@ -887,7 +1029,7 @@ export async function buildInk(g: BoardGeometry, opt: InkOptions): Promise<InkLa
   grab(1);
   await yieldFrame();
 
-  // B: sea lanes as ink dabs, and the decorative (non-playable) coasts, finer.
+  // B: the decorative (non-playable) coasts, finer.
   for (const p of g.decorativeLand) {
     const sdn = seed++;
     dryBrush(ctx, flatOf(p.outer), true, {
@@ -902,46 +1044,7 @@ export async function buildInk(g: BoardGeometry, opt: InkOptions): Promise<InkLa
       streak: sb ? streakFor(sb, sdn, 0.1 * u, spacing) : undefined,
     });
   }
-  let dabSeed = 7;
-  for (const lane of g.seaLanes) {
-    for (const seg of lane.segments) {
-      // walk the polyline, a dab every ~0.62 units, each a short tapered brush mark along the lane
-      const pts = seg.map(px);
-      let total = 0;
-      const cum = [0];
-      for (let i = 1; i < pts.length; i++) {
-        total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
-        cum.push(total);
-      }
-      const step = 0.62 * u;
-      const count = Math.max(2, Math.round(total / step));
-      const at = (d: number): [number, number, number] => {
-        let k = 1;
-        while (k < cum.length - 1 && cum[k] < d) k++;
-        const a = pts[k - 1];
-        const b = pts[k];
-        const t = (d - cum[k - 1]) / Math.max(1e-6, cum[k] - cum[k - 1]);
-        return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, Math.atan2(b[1] - a[1], b[0] - a[0])];
-      };
-      for (let i = 0; i < count; i++) {
-        const d = ((i + 0.5) / count) * total;
-        const [x, y, ang] = at(d);
-        const L = (0.2 + 0.08 * hash1(i, dabSeed)) * u;
-        const Wd = (0.06 + 0.025 * hash1(i + 3, dabSeed)) * u;
-        const dx = Math.cos(ang);
-        const dy = Math.sin(ang);
-        const f: number[] = [];
-        const bend = (hash1(i + 7, dabSeed) - 0.5) * 0.35 * Wd;
-        for (let q = 0; q <= 6; q++) {
-          const t = q / 6 - 0.5;
-          const off = bend * (1 - 4 * t * t);
-          f.push(x + dx * L * t - dy * off, y + dy * L * t + dx * off);
-        }
-        dryBrush(ctx, f, false, { width: Wd, passes: 3, alpha: 0.75, jitter: 0.004 * u, dry: 0, seed: dabSeed * 31 + i, spacing: Math.max(0.8, spacing * 0.7), endTaper: 1, thin: 0.6 });
-      }
-      dabSeed++;
-    }
-  }
+  // (The sea lanes are printed crossings of their own now: lanes.ts. B keeps the decorative coasts.)
   grab(2);
   for (let j = 3; j < inkData.length; j += 4) inkData[j] = 255;
   canvas.width = canvas.height = 1;
@@ -1067,6 +1170,7 @@ export async function buildInk(g: BoardGeometry, opt: InkOptions): Promise<InkLa
   const layer: InkLayer = {
     ink: inkTex,
     field: fieldTex,
+    cont: contTex,
     noise,
     waves,
     waveRows,

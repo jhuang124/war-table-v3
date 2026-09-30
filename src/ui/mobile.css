@@ -420,3 +420,13 @@
 .form-phone.landscape .v-actions > [data-testid='rematch'] { grid-column: auto; height: 2.875rem; }
 .form-phone.landscape .tl-row { height: 2.2rem; }
 .form-phone.landscape .v-scroll { gap: 0.85rem; }
+
+
+/* v3 table cues on phones: a narrower cup slot, the event line only (no ledger lines), no round label in the say row */
+.form-phone .seat-chip { --cup-slot: 1.75rem; }
+.form-phone .ts-cup .cup-body { width: 1.55rem; height: 1.75rem; }
+.form-phone .sc-marks { height: 0.7rem; font-size: 0.75rem; }
+.form-phone .sc-cards svg { display: none; }
+.form-phone .st-events .ev-line.prev { display: none; }
+.form-phone .st-events .ev-line { font-size: 0.8125rem; }
+.form-phone .st-round { display: none; }

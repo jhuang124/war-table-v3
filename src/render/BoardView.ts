@@ -223,6 +223,12 @@ export interface BoardView {
   onStroke?(cb: (s: { from: TerritoryId; to: TerritoryId | null; done: boolean }) => void): void;
   /** Additive (lead, ink overhaul; docs/INK.md A1): ambient "living calm" layer on/off (off under reduced motion). */
   setAmbient?(on: boolean): void;
+  /**
+   * Additive (renderer, v3 physical board; _claude/v3/PLAN.md §1 "occupy preview = a ghost stack"): the totals
+   * a count being chosen would leave (occupy / fortify: source and target), drawn as ghost stacks at that
+   * height; null clears them. The controller already sends it when the board has it (PreviewBoard).
+   */
+  setCountPreview?(totals: Partial<Record<TerritoryId, number>> | null): void;
 
   /**
    * Screen position (client px) of a territory's army piece — the top centre of its base, which is always

@@ -1,4 +1,4 @@
-// The menu (the ≡ pill; Esc is its hidden accelerator): Resume · Rules · Settings · Log · Save & quit · End game now · Restart. The Log is
+// The menu (the ≡ pill; Esc is its hidden accelerator): Resume · Rules · Settings · Ledger · Save & quit · End game now · Restart. The Log is
 // read-only, newest first; AI speed lives in Settings. Then End game now → confirm → Victory (called in
 // round N) with award cards, the territories chart and standings → Rematch (same seats, new seed, one
 // click). The AIs play a few rounds first (autoplay at fast) so the ledgers have something to say.
@@ -42,16 +42,16 @@ if (!early) {
   await clickBtn(page, 'menu');
   await page.waitForSelector('[data-testid="pause"]', { timeout: 3000 });
   const items = await page.locator('[data-testid="pause"] .menu-item .btn-label').allTextContents();
-  check(items.join(' · ') === 'Resume · How to play · Settings · Log · Save & quit · End game now · Restart', `≡ → the menu: ${items.join(' · ')}`, results);
+  check(items.join(' · ') === 'Resume · How to play · Settings · Ledger · Save & quit · End game now · Restart', `≡ → the menu: ${items.join(' · ')}`, results);
   await page.screenshot({ path: `${ART}/endgame-pause.png` });
-  // Log: read-only, newest first.
+  // The ledger (v3): read-only, by round, newest round first and open; the round headings fold.
   await clickBtn(page, 'pause-log');
   await page.waitForSelector('[data-testid="log"]', { timeout: 3000 });
-  const rounds = await page.locator('[data-testid="log"] .log-round').allTextContents();
-  const nums = rounds.filter(Boolean).map((r) => Number(r.replace(/^\D+/, '')));
-  check(nums.length > 5 && nums.every((n, i) => i === 0 || n <= nums[i - 1]), `log: ${nums.length} lines, newest first (R${nums[0]} … R${nums[nums.length - 1]})`, results);
-  const clickable = await page.locator('[data-testid="log"] button:not([data-testid="log-close"])').count();
-  check(clickable === 0, 'log lines are read-only', results);
+  const rounds = await page.locator('[data-testid="log"] .lg-round').evaluateAll((els) => els.map((e) => Number((e as HTMLElement).dataset.round)));
+  const lines = await page.locator('[data-testid="log"] .lg-round:not(.closed) .log-line').count();
+  check(rounds.length > 2 && rounds.every((n, i) => i === 0 || n < rounds[i - 1]) && lines > 0, `ledger: ${rounds.length} rounds, newest first (R${rounds[0]} … R${rounds[rounds.length - 1]}), ${lines} lines open`, results);
+  const clickable = await page.locator('[data-testid="log"] button:not([data-testid="log-close"]):not(.lg-head)').count();
+  check(clickable === 0, 'ledger lines are read-only (only the round headings fold)', results);
   await clickBtn(page, 'log-close');
   await page.waitForSelector('[data-testid="pause"]', { timeout: 3000 });
   // Settings has AI speed.

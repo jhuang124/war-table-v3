@@ -84,7 +84,7 @@ export const DEFAULT_SETTINGS: Settings = {
   aiSpeed: 'watch',
   textSize: 'laptop',
   showLabels: false,
-  hideCardsBetweenTurns: false,
+  hideCardsBetweenTurns: true,
   sfxVolume: 0.8,
   muted: false,
   music: true,
@@ -98,16 +98,14 @@ export const DEFAULT_SETTINGS: Settings = {
 /**
  * Settings file version. v3: the hand-off cover defaults on for touch devices (docs/MOBILE.md §5).
  * v4 (ink overhaul, docs/INK.md A1/A4): the soft ambient score defaults on, plus the living-board
- * `ambient` switch and a music volume.
+ * `ambient` switch and a music volume. v5 (_claude/v3/PLAN.md §2): the pass-the-cup cover defaults on
+ * everywhere (it only ever shows with 2+ humans).
  */
-export const SETTINGS_VERSION = 4;
+export const SETTINGS_VERSION = 5;
 
-/**
- * Defaults for this device. A phone or tablet is physically passed around, so the hand-off cover (which
- * hides the next player's cards) defaults on there; it only ever shows with 2+ humans.
- */
-export function defaultSettings(touch = false): Settings {
-  return { ...DEFAULT_SETTINGS, hideCardsBetweenTurns: touch };
+/** Defaults (the same on every device since v5: the cover is on; it only ever shows with 2+ humans). */
+export function defaultSettings(_touch = false): Settings {
+  return { ...DEFAULT_SETTINGS };
 }
 
 export function sanitizeSettings(x: unknown, touch = false): Settings {
@@ -124,9 +122,8 @@ export function sanitizeSettings(x: unknown, touch = false): Settings {
   // Before v4 the music bed defaulted off, so a saved `false` was the old default, not a choice: the
   // ambient score comes on (docs/INK.md A4). A v4 file's value counts.
   if (v < 4) s.music = true;
-  // Before v3 the cover defaulted off everywhere, so a saved `false` on a touch device was the old
-  // default, not a choice: only an explicit `true` (or a v3 file) counts there.
-  if (touch && v < 3 && o.hideCardsBetweenTurns === false) s.hideCardsBetweenTurns = true;
+  // Before v5 the cover defaulted off (on desktop), so a saved `false` was the old default, not a choice.
+  if (v < 5 && o.hideCardsBetweenTurns === false) s.hideCardsBetweenTurns = true;
   // Territory names went off by default in the simplify pass (settings v2): a v1 file's `true` was the
   // old default, not a choice, so only a v2 file's value counts.
   if (v >= 2 && typeof o.showLabels === 'boolean') s.showLabels = o.showLabels;

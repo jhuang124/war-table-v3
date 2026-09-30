@@ -9,7 +9,7 @@
 // at most two buttons). The dice tray header, one banner, the cards sheet and the menu sheets come and go.
 
 import type { AudioEngine } from '../audio/types';
-import type { AiDifficulty, CardSymbol, PlayerColorId, PlayerId, PlayerKind, PlayerStats, TimelinePoint } from '../engine/types';
+import type { AiDifficulty, CardSymbol, ContinentId, PlayerColorId, PlayerId, PlayerKind, PlayerStats, TimelinePoint } from '../engine/types';
 import type { ViewportInsets } from '../render/BoardView';
 
 // ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ export interface Settings {
   textSize: TextSize; // root font scale 1.0 / 1.25 / 1.5
   /** Territory names on every tile (off by default: the hovered and picked tiles show theirs). */
   showLabels: boolean;
-  hideCardsBetweenTurns: boolean; // hand-off cover: default off, on for touch devices (docs/MOBILE.md §5)
+  hideCardsBetweenTurns: boolean; // the pass-the-cup cover: default on everywhere since settings v5 (_claude/v3/PLAN.md §2)
   sfxVolume: number; // 0..1
   muted: boolean;
   /** The soft ambient score (docs/INK.md A4). Default on since settings v4. */
@@ -109,6 +109,12 @@ export interface SeatChipVM {
   lostKey?: number;
   /** Additive (ink overhaul, A5): who knocked this seat out and when, for the empty / cracked ring. */
   out?: { by: SeatRef; round: number } | null;
+  /** Additive (v3 table cues): the seat's army total on the displayed board. */
+  armies?: number;
+  /** Additive (v3): cards in hand (a count only; the hand stays private). */
+  cards?: number;
+  /** Additive (v3): the continents this seat holds whole, CONTINENT_IDS order. */
+  continents?: ContinentId[];
 }
 
 /**
@@ -291,6 +297,10 @@ export interface GameVM {
   cards: CardsVM | null;
   /** Oldest first; the Log sheet shows it newest first. */
   log: LogLineVM[];
+  /** Additive (v3, PLAN §3): the round on the displayed board ("Round 6" in the dock). */
+  round?: number;
+  /** Additive (v3, PLAN §3): the ledger's last lines, oldest first (the dock's event line: the latest, and on desktop the one before it). */
+  events?: LogLineVM[];
   banner: BannerVM | null;
   handoff: { seat: SeatRef; subline: string } | null; // 'Pass to Sam' cover
   confirm: { kind: 'endGame' | 'restart'; text: string } | null;

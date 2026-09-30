@@ -1,21 +1,25 @@
-// Continents on the painted board: a quiet serif label on the sea ("ASIA · +7"), and — once someone holds
-// the whole continent — its coastline re-inked in the holder's wash (docs/INK.md B §3: the halo contour is
-// gone). A new holder's ink sweeps clockwise from north; a lost hold dries back to ivory.
+// Continents on the printed board (_claude/v3/PLAN.md §2): a serif label on the sea ("ASIA · +7") printed in
+// the continent's own tint (the tint its halo of sea carries, and the tick a holder's seat shows in the strip),
+// and — once someone holds the whole continent — its heavy outline (ink.ts / inkGlsl.ts continentInk) re-inked
+// in the holder's colour. A new holder's ink sweeps clockwise from north (600 ms) while the label's "+N"
+// brightens; a lost hold dries back to silver.
 import * as THREE from 'three';
 import type { BoardGeometry } from '../map/types';
 import type { ContinentId, GameState, PlayerId, TerritoryId } from '../engine/types';
 import { CONTINENTS, CONTINENT_IDS } from '../engine/mapData';
-import { PLAYER_COLORS } from '../shared/palette';
+import { PLAYER_COLORS, continentInk } from '../shared/palette';
 import { Animator, ease, type Run } from './anim';
 import { INK_COAST, hexToRgb, mixRgb, setColor, toWorld, type RGB } from './util';
 import type { SharedUniforms } from './inkGlsl';
 import type { InkLayer } from './ink';
 
 export const FONT_SERIF = "'Cormorant Garamond Variable', 'Cormorant Garamond', Georgia, serif";
-const NEUTRAL_LABEL: RGB = hexToRgb(INK_COAST);
-/** Label opacity: unheld labels are quiet; a held one takes its holder's colour. */
-const LABEL_A = 0.42;
-const HELD_LABEL_A = 0.66;
+void INK_COAST;
+/** The label in its continent's tint, lifted so the words read on the indigo. */
+const tintOf = (ci: number): RGB => hexToRgb(continentInk(ci, 0.45));
+/** Label opacity: unheld labels are quiet; a held one is a little stronger. */
+const LABEL_A = 0.5;
+const HELD_LABEL_A = 0.72;
 
 interface Cont {
   id: ContinentId;
@@ -102,7 +106,7 @@ export class Continents {
         h = w / aspect;
       }
       const labelMat = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, opacity: LABEL_A, toneMapped: false });
-      setColor(labelMat.color, NEUTRAL_LABEL);
+      setColor(labelMat.color, tintOf(ci));
       const label = new THREE.Mesh(new THREE.PlaneGeometry(w, h), labelMat);
       label.rotation.x = -Math.PI / 2;
       toWorld(la[0], la[1], 0.03, label.position);
@@ -113,7 +117,7 @@ export class Continents {
       this.materials.push(labelMat);
       const c = ink.continentCentre[id];
       shared.uContSweep.value[ci].set(c[0], c[1], 0, 0);
-      this.conts.set(id, { id, ci, label, labelMat, holder: -2, labelRgb: NEUTRAL_LABEL, labelA: LABEL_A, amount: 0, sweep: 0, ver: 0 });
+      this.conts.set(id, { id, ci, label, labelMat, holder: -2, labelRgb: tintOf(ci), labelA: LABEL_A, amount: 0, sweep: 0, ver: 0 });
     });
     for (const c of this.conts.values()) this.apply(c);
   }
@@ -131,11 +135,20 @@ export class Continents {
     for (const c of this.conts.values()) c.holder = -2;
   }
 
-  /** The holder's coast ink: its wash, lifted toward ivory so it still reads as a line on the indigo. */
+  /** The holder's outline ink: its wash, lifted toward its light so it still reads as a line on the indigo. */
   private inkFor(state: GameState | null, holder: PlayerId): RGB | null {
     const pal = holder >= 0 && state?.players[holder] ? PLAYER_COLORS[state.players[holder].color] : null;
     if (!pal) return null;
-    return mixRgb(hexToRgb(pal.base), hexToRgb(pal.light), 0.3);
+    return mixRgb(hexToRgb(pal.base), hexToRgb(pal.light), 0.45);
+  }
+  /** Test hook: each continent's holder and whether its outline is inked in the holder's colour. */
+  state(): Record<string, { holder: PlayerId; amount: number; color: [number, number, number] }> {
+    const out: Record<string, { holder: PlayerId; amount: number; color: [number, number, number] }> = {};
+    for (const c of this.conts.values()) {
+      const v = this.shared.uContColor.value[c.ci];
+      out[c.id] = { holder: c.holder, amount: c.amount, color: [v.x, v.y, v.z] };
+    }
+    return out;
   }
 
   /**
@@ -152,7 +165,7 @@ export class Continents {
       const prevHolder = c.holder;
       c.holder = holder;
       const ink = this.inkFor(state, holder);
-      const toLabel: RGB = ink ?? NEUTRAL_LABEL;
+      const toLabel: RGB = tintOf(c.ci);
       const toLabelA = ink ? HELD_LABEL_A : LABEL_A;
       const from = { l: c.labelRgb, la: c.labelA, a: c.amount };
       const ver = ++c.ver;
@@ -189,16 +202,18 @@ export class Continents {
     c.amount = 1;
     if (this.anim.instant || this.reducedMotion) {
       c.sweep = 1;
-      c.labelRgb = rgb;
+      c.labelRgb = tintOf(c.ci);
       c.labelA = HELD_LABEL_A;
       this.apply(c);
       if (this.reducedMotion && !this.anim.instant) await this.anim.wait(150, run);
       return;
     }
     c.sweep = 0;
-    const fromL = c.labelRgb;
+    const tint = tintOf(c.ci);
     const fromA = c.labelA;
     this.apply(c);
+    // the outline re-inks round the continent; the label's "+N" brightens (toward ivory, full strength) and
+    // settles to its held weight as the stroke closes
     await this.anim.tween({
       ms: 600,
       ease: ease.inOutSine,
@@ -206,11 +221,17 @@ export class Continents {
       update: (v) => {
         if (c.ver !== ver) return;
         c.sweep = v;
-        c.labelRgb = mixRgb(fromL, rgb, v);
-        c.labelA = fromA + (HELD_LABEL_A - fromA) * v;
+        const glow = Math.sin(Math.PI * Math.min(1, v * 1.25));
+        c.labelRgb = mixRgb(tint, [0.95, 0.93, 0.89], 0.5 * glow);
+        c.labelA = Math.min(1, fromA + (HELD_LABEL_A - fromA) * v + 0.3 * glow);
         this.apply(c);
       },
     });
+    if (c.ver === ver) {
+      c.labelRgb = tint;
+      c.labelA = HELD_LABEL_A;
+      this.apply(c);
+    }
   }
 
   /**

@@ -24,6 +24,7 @@ import { TokenSystem } from './tokens';
 import { Overlay } from './overlay';
 import { Continents } from './continents';
 import { AttackArrow, FortifyRoute, LiveStroke } from './fx';
+import { SeaLanes } from './lanes';
 import { buildInk } from './ink';
 import { makeSharedUniforms } from './inkGlsl';
 import { DiceTray, boardTrayGeometry } from './dice';
@@ -162,6 +163,8 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
   scene.add(arrow.group);
   const route = new FortifyRoute(tiles, anim, ink.noise);
   scene.add(route.group);
+  const lanes = new SeaLanes(G, anim);
+  scene.add(lanes.group);
   const live = new LiveStroke(anim, ink.noise);
   scene.add(live.group);
   // The gold stroke and the fortify route run figure to figure (the figures stand beside their rings).
@@ -257,6 +260,8 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
   const recede = (pair: string[] | null, ms: number) => {
     if ((fightPair?.join('>') ?? '') === (pair?.join('>') ?? '')) return;
     fightPair = pair;
+    // The two fighting territories' figures stand while the ring is up (PLAN §1: figures in fights only).
+    tokens.setFight(pair as TerritoryId[] | null);
     fightDimMs = reduced || anim.instant ? 0 : ms;
     try {
       applyHighlights(lastHl, lastHl);
@@ -382,7 +387,9 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
         tw(t, 'selectLift', t.selectLift, lift, up ? 160 : 120, up ? (reduced ? ease.outCubic : ease.outBack(1.4)) : ease.inQuad);
       }
       // Fortify's phase dim is deeper than a selection's: the board becomes "your side" (docs/ROUND2.md §A).
-      const dim = Math.max(h.dimOthers && !keep.has(t.id) ? 1 : 0, phaseDimmed.has(t.id) ? 1.8 : 0, fightDimOf(t.id));
+      // A pick shows its reach (PLAN §2 'visible water = adjacency'): land it can't touch recedes a little.
+      const reach = sel && !fightPair && t.id !== sel && !ADJACENCY[sel].includes(t.id) ? 0.8 : 0;
+      const dim = Math.max(h.dimOthers && !keep.has(t.id) ? 1 : 0, phaseDimmed.has(t.id) ? 1.8 : 0, fightDimOf(t.id), reach);
       if (Math.abs(dim - t.dim) > 1e-4) tw(t, 'dim', t.dim, dim, fightDimMs ?? (dim > t.dim ? 180 : 140), ease.outQuad);
       overlay.setDim(t.id, dim >= 1);
       if (!clickable.has(t.id) && t.hoverLift > 0 && t.id !== hovered) tw(t, 'hoverLift', t.hoverLift, 0, 140);
@@ -392,11 +399,13 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     updateCursor();
     // pending ghosts
     for (const id of TERRITORY_IDS) overlay.setGhost(id, Math.max(0, h.pending?.[id] ?? 0));
+    pushPreview(h);
     // names: the picked source and the armed target show theirs (the hovered tile's is set on hover)
     const named: TerritoryId[] = [];
     if (sel) named.push(sel);
     if (h.arrow) named.push(h.arrow.from, h.arrow.to);
     overlay.setFocus(named);
+    litLanes(h);
     // arrow / route
     const a = h.arrow ?? null;
     if (a && a.kind === 'attack') {
@@ -437,6 +446,37 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     const [pairFrom, pairTo] = lastPairKey.split('>');
     const autoChain = !h.arrow && !!h.selected && (h.selected === pairFrom || h.selected === pairTo);
     if (selKey(h) !== selKey(prev) && tray.visible && rolling === 0 && !autoChain) hideTray(TRAY_FADE_MS);
+  };
+
+  /**
+   * Ghost stacks (PLAN §1 "occupy preview = a ghost stack"): a staged placement's total, and the controller's
+   * occupy / fortify totals while a count is being chosen (setCountPreview). A total under the stack fades
+   * the discs that would leave; one over it stands as a paler ghost at that height.
+   */
+  let countPreview: Partial<Record<TerritoryId, number>> | null = null;
+  const pushPreview = (h: BoardHighlights) => {
+    const tot: Partial<Record<TerritoryId, number>> = {};
+    let any = false;
+    for (const [id, n] of Object.entries(h.pending ?? {}) as [TerritoryId, number][])
+      if (n > 0) {
+        tot[id] = armies[id] + n;
+        any = true;
+      }
+    if (countPreview)
+      for (const [id, n] of Object.entries(countPreview) as [TerritoryId, number][]) {
+        tot[id] = n;
+        any = true;
+      }
+    tokens.setPreview(any ? tot : null);
+  };
+
+  /** The crossings brighten with the pick, the armed pair and the hovered tile. */
+  const litLanes = (h: BoardHighlights) => {
+    const ids: TerritoryId[] = [];
+    if (h.selected) ids.push(h.selected);
+    if (h.arrow) ids.push(h.arrow.from, h.arrow.to);
+    if (hovered) ids.push(hovered);
+    lanes.light(ids);
   };
 
   // --- phase response (no camera moves) ---------------------------------------------------------
@@ -627,6 +667,7 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     const prev = hovered;
     hovered = id;
     overlay.setHover(id);
+    litLanes(lastHl);
     if (prev) setHoverLook(prev, false);
     if (id && clickable.has(id)) setHoverLook(id, true);
     updateCursor();
@@ -1251,7 +1292,7 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
           tokens.setArmies(p.id, armies[p.id], 'drop');
           if (anim.instant) refreshBadge(p.id, false);
         } else {
-          tokens.setArmies(p.id, armies[p.id], 'lift');
+          tokens.setArmies(p.id, armies[p.id], 'lift', null, null, { unplace: true });
           overlay.pop(p.id);
           sfx('unplace', { volume: p.vol, pan: panOf(p.id) });
         }
@@ -1461,8 +1502,10 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
       hitFlash(t);
     }
     if (e.defenderLosses > 0) {
-      // Emptied, the defender's piece topples toward the attacker (docs/ROUND2.md §D).
-      tokens.setArmies(e.to, toN, 'hit', null, e.from);
+      // Emptied: the top disc slides off; if this was the seat's last territory, its last stack topples and
+      // dissolves disc by disc (PLAN §1 "elimination"), inside the elimination's own sweep.
+      const last = toN <= 0 && !TERRITORY_IDS.some((t) => t !== e.to && owners[t] === e.defender) && !!lastState?.players[e.defender]?.eliminated;
+      tokens.setArmies(e.to, toN, 'hit', null, e.from, { topple: last });
       refreshBadge(e.to, true);
       if (chips) overlay.lossChip(e.to, e.defenderLosses, 1);
       hitFlash(tiles.get(e.to));
@@ -1734,6 +1777,11 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
           // A manual occupy count after a pause is a 400 ms move.
           const inline = o.inlineMarch ?? (lastConquered === to && performance.now() - lastConquestAt < 1500);
           ms = style === 'brief' ? 200 : inline ? 500 : 400;
+        }
+        // the count is chosen: its ghost goes as the real stack sets off
+        if (countPreview) {
+          countPreview = null;
+          pushPreview(lastHl);
         }
         // lift-off
         armies[from] = fromN;
@@ -2050,6 +2098,46 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     keepBand = insets.trayBand;
     layoutTray();
   };
+  /**
+   * A stone never crosses another territory's land nor covers another territory's numeral (lead review
+   * 2026-09-30). At the home view each territory's largest stone (diameter, CSS px) is capped at twice the
+   * smaller of: its anchor's distance to any other territory's land, and its distance to any other anchor less
+   * that numeral's half-size. Floor: the 1-army stone (then the stone stops growing; the numeral carries the
+   * count). Count-independent, so a stone never jumps when a neighbour's count changes.
+   */
+  let capsFloored = 0;
+  let capsLowered = 0;
+  const fitCaps = () => {
+    const cam = rig.homeCamera();
+    const v = new THREE.Vector3();
+    const pts = TERRITORY_IDS.map((id) => {
+      v.copy(tiles.get(id).anchorW).project(cam);
+      return [(v.x * 0.5 + 0.5) * W, (-v.y * 0.5 + 0.5) * H];
+    });
+    const ppu = homePxPerUnit();
+    const dmin = tokens.dminPx * tokens.sizeScale;
+    const dmax = tokens.dmaxPx * tokens.sizeScale;
+    const numHalf = 7 * tokens.sizeScale;
+    const caps = TERRITORY_IDS.map((id, i) => {
+      const ti = tiles.get(id);
+      let land = Infinity;
+      let num = Infinity;
+      TERRITORY_IDS.forEach((o, j) => {
+        if (j === i) return;
+        const tj = tiles.get(o);
+        // (only territories whose box comes near this anchor)
+        const [x0, y0, x1, y1] = tj.bbox;
+        const gap = Math.max(x0 - ti.anchor[0], 0, ti.anchor[0] - x1, y0 - ti.anchor[1], 0, ti.anchor[1] - y1);
+        if (gap * ppu < dmax) for (const ring of tj.rings) land = Math.min(land, distToRing(ti.anchor[0], ti.anchor[1], ring) * ppu);
+        num = Math.min(num, Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]) - numHalf);
+      });
+      return Math.max(dmin, Math.min(dmax, 2 * land, 2 * num));
+    });
+    capsFloored = caps.filter((c) => c <= dmin + 1e-6).length;
+    capsLowered = caps.filter((c) => c < dmax - 1e-6).length;
+    tokens.setCaps(new Map(TERRITORY_IDS.map((id, i) => [id, caps[i]])));
+  };
+
   /** The dice tray's own band height when the HUD doesn't report one (tray + a little air). */
   const nominalBand = () => boardTrayGeometry(W, H, 1e9, uiScale).trayH + 12;
   /** Largest band the HUD has reported (sticky): the home view's tray keep-out follows it. */
@@ -2070,28 +2158,30 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     // sides. (The HUD's header line is centred and short; southern pieces near the tray's ends sit beside it.)
     const clear = 6 * uiScale;
     rig.trayKeepOut = { x0: W / 2 - g.trayW / 2 - 12, x1: W / 2 + g.trayW / 2 + 12, y0: H - insets.bottom - kb + (kb - g.trayH) / 2 - clear };
+    // The stones are sized in CSS px at the home view (14 → 36 px at 1440×900; phones 12 → 24), so their
+    // board size follows the home scale: fit, size, fit again.
+    tokens.dminPx = compact ? 12 : 14;
+    tokens.dmaxPx = compact ? 24 : 36;
+    for (let it = 0; it < 3; it++) {
+      setPieceExtents();
+      rig.recomputeHome();
+      tokens.pxUnit = 1 / Math.max(0.5, homePxPerUnit());
+    }
     setPieceExtents();
     rig.recomputeHome();
-    if (compact) {
-      // Phones: the count plaque (≥ 20 px) is far bigger than the piece at the home scale, so fit its real
-      // reach below the base (in board units at this scale), and let the player zoom in further.
-      for (let it = 0; it < 2; it++) {
-        const ppu = homePxPerUnit();
-        const ph = overlay.plaqueH(tokens.figH[0] * tokens.sizeScale * tokens.figBoost * ppu);
-        // the ring (≥ 20 px) is wider than the figure at the home scale: fit its real reach
-        const reach = (0.2 * ph) / Math.max(0.5, ppu * Math.sin((HOME_PITCH * Math.PI) / 180));
-        rig.pieceExtents = tokens.extentPoints(HOME_PITCH, Math.max(0.8 * (1 + (uiScale - 1) * 0.8), reach), null, (1.1 * ph) / Math.max(0.5, ppu));
-        rig.recomputeHome();
-      }
-      rig.zoomInMax = clamp(40 / Math.max(1, homePxPerUnit()), 3.5, 9);
-    } else rig.zoomInMax = 3.5;
+    fitCaps();
+    tokens.markDirty();
+    rig.zoomInMax = compact ? clamp(40 / Math.max(1, homePxPerUnit()), 3.5, 9) : 3.5;
     continents.fitLabels(rig.homeCamera(), W);
     // The coastline breath reaches 0.5 CSS px at the home zoom (A1): in ink texels at this scale.
     const pxPerTexel = (homePxPerUnit() * G.width) / Math.max(1, shared.uInkSize.value.x);
     shared.uWob.value = clamp(0.5 / Math.max(0.05, pxPerTexel), 0.25, 6);
+    // The continent outline (PLAN §2): the heaviest line on the board, a crisp ~1.8 px at the home view (1.4 on phones).
+    shared.uContW.value = clamp((compact ? 0.7 : 0.9) / Math.max(1, homePxPerUnit()), 0.02, 0.3);
     // The attack stroke's weight is set in screen px at the home view (INK review F4): ~2 px tail, ~9 px head.
     arrow.pxUnit = live.pxUnit = 1 / Math.max(1, homePxPerUnit());
     arrow.relayout();
+    lanes.setPxUnit(1 / Math.max(1, homePxPerUnit()));
     invalidate();
   };
   /** CSS px per board unit at the centre of the board, at the home view. */
@@ -2572,6 +2662,10 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     setAudio(a: AudioEngine | null) {
       audio = a;
     },
+    setCountPreview(totals: Partial<Record<TerritoryId, number>> | null) {
+      countPreview = totals ? { ...totals } : null;
+      pushPreview(lastHl);
+    },
     setAutoCamera(on: boolean) {
       autoCamera = on;
     },
@@ -2623,10 +2717,11 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
       arrow.dispose();
       route.dispose();
       live.dispose();
+      lanes.dispose();
       tray.dispose();
       overlay.dispose();
       parts.waves.dispose();
-      for (const t of [ink.ink, ink.field, ink.noise, ink.waves, shared.uTerr.value]) t.dispose();
+      for (const t of [ink.ink, ink.field, ink.cont, ink.noise, ink.waves, shared.uTerr.value]) t.dispose();
       window.removeEventListener('keydown', onWindowInput);
       window.removeEventListener('pointerdown', onWindowInput);
       scene.traverse((o) => {
@@ -2718,6 +2813,14 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     touchPick: (x: number, y: number) => touchPick(x, y, clickable),
     homePxPerUnit,
     tokens,
+    get capsFloored() {
+      return capsFloored;
+    },
+    get capsLowered() {
+      return capsLowered;
+    },
+    lanes,
+    continents,
     overlay,
     get hovered() {
       return hovered;

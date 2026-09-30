@@ -1,32 +1,29 @@
-// DOM overlay above the canvas: the army count beside each figure in a brushed ensō ring (docs/INK.md
-// B §3), the +N staged beside it while a placement is staged, −N as a loss re-inks, the travellers'
-// counts, and territory names (hidden unless hovered, picked, or the "Territory names" setting is on).
-// Text is laid out at its real size (no CSS scale at rest), so it stays crisp at DPR 1 and 2. All writes
-// are batched once per frame, and only when they change.
+// DOM overlay above the canvas: the army count painted on each stack's top disc (_claude/v3/PLAN.md §1: an
+// ivory numeral on the inlay; no rings), the +N staged beside it while a placement is staged, −N as a loss
+// lands, the walking stacks' counts, and territory names (hidden unless hovered, picked, in a fight, or the
+// "Territory names" setting is on). Text is laid out at its real size (no CSS scale at rest), so it stays
+// crisp at DPR 1 and 2. All writes are batched once per frame, and only when they change.
 //
-// The rings are the shared seeded ensō (src/shared/enso.ts): a few brush variants per seat, each ring
-// turned its own way, so no two read the same (wabi-sabi); the numbers are plain, crisp Cormorant
-// Garamond 600 with lining, tabular figures, ivory on the owner's deep ink.
+// The numbers are plain, crisp Cormorant Garamond 600 with lining, tabular figures, ivory on the stack's
+// deep-ink inlay, squashed a little so they lie on the tilted face.
 import * as THREE from 'three';
 import type { TerritoryId } from '../engine/types';
 import { TERRITORY_IDS, TERRITORIES } from '../engine/mapData';
 import type { PlayerPalette } from '../shared/palette';
 import type { BoardGeometry } from '../map/types';
 import type { TileSet } from './tiles';
-import type { TokenSystem } from './tokens';
-import { Animator, ease } from './anim';
+import { DISC_E, type TokenSystem } from './tokens';
 import { hexToRgb } from './util';
-import { PLAYER_COLORS } from '../shared/palette';
-import { ensoPath } from '../shared/enso';
+import { Animator, ease } from './anim';
 
 const SERIF = "'Cormorant Garamond Variable','Cormorant Garamond',Georgia,serif";
 const CSS = `
 .rb-overlay{position:absolute;inset:0;pointer-events:none;overflow:hidden;user-select:none;-webkit-user-select:none;contain:strict;--ui:1;--lab:1}
-.rb-badge,.rb-trav{position:absolute;left:0;top:0;width:28px;height:28px;display:flex;align-items:center;justify-content:center;
-  box-sizing:border-box;color:#f2ede2;font:600 19px/1 ${SERIF};font-variant-numeric:lining-nums tabular-nums;font-feature-settings:'lnum' 1,'tnum' 1;
+.rb-badge,.rb-trav{position:absolute;left:0;top:0;width:28px;height:16px;display:flex;align-items:center;justify-content:center;
+  box-sizing:border-box;color:#f2ede2;font:600 14px/1 ${SERIF};font-variant-numeric:lining-nums tabular-nums;font-feature-settings:'lnum' 1,'tnum' 1;
   letter-spacing:0;white-space:nowrap;will-change:transform;visibility:hidden;transition:opacity 180ms ease-out}
-.rb-ring{position:absolute;inset:0;background-size:100% 100%;background-repeat:no-repeat}
-.rb-badge .n,.rb-trav .n{position:relative;display:block;transform:translateY(-.05em)}
+.rb-ring{display:none}
+.rb-badge .n,.rb-trav .n{position:relative;display:block;transform:translateY(-.04em) scaleY(.86)}
 .rb-badge.dim{opacity:.8}
 .rb-badge.ghosted{z-index:2}
 .rb-ghost{position:absolute;left:calc(100% + 2px);top:50%;transform:translateY(-54%);color:#f2ede2;
@@ -43,28 +40,8 @@ const CSS = `
 .rb-cut{position:absolute;inset:0;background:#0b1224;opacity:0}
 `;
 
-/** Ring variants per seat (each ring also turns its own way). */
+/** Kept for the badge's stable per-territory variant (the old ring's). */
 const RING_VARIANTS = 6;
-const ringCache = new Map<string, string>();
-/** The ring for a seat: a brushed ensō in a pale seat-tinted ivory round a disc of the seat's deep ink. */
-function ringImage(pal: PlayerPalette, variant: number): string {
-  const key = `${pal.id}:${variant}`;
-  let url = ringCache.get(key);
-  if (!url) {
-    const e = ensoPath(9173 + variant * 131 + pal.id.length * 17, { bristles: 4, samples: 60, weight: 1.05 });
-    const [lr, lg, lb] = hexToRgb(pal.light);
-    const ivory = [0.95, 0.93, 0.886];
-    const mix = (a: number, b: number) => Math.round((a * 0.62 + b * 0.38) * 255);
-    const stroke = `rgb(${mix(ivory[0], lr)},${mix(ivory[1], lg)},${mix(ivory[2], lb)})`;
-    const svg =
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="7 7 86 86">` +
-      `<circle cx="50" cy="50" r="37" fill="${pal.deep}" fill-opacity=".9"/>` +
-      `<path d="${e.d}" fill="${stroke}"/></svg>`;
-    url = `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}")`;
-    ringCache.set(key, url);
-  }
-  return url;
-}
 const hash01 = (s: string) => {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
@@ -156,6 +133,7 @@ export class Overlay {
   private travLayer: HTMLDivElement;
   private v = new THREE.Vector3();
   private v2 = new THREE.Vector3();
+  private right = new THREE.Vector3(1, 0, 0);
   private showAll = false;
   private focusIds = new Set<TerritoryId>();
   private hoverId: TerritoryId | null = null;
@@ -296,8 +274,16 @@ export class Overlay {
       b.shown = n;
     }
     if (b.lastInk !== pal.id) {
+      // ivory on every stone (the stone's wash is laid on thicker than the territory's, dark enough for it)
+      const [r, g, bl] = hexToRgb(pal.base);
+      const light = 0.299 * r + 0.587 * g + 0.114 * bl > 0.5;
+      const [dr, dg, db] = hexToRgb(pal.deep).map((c) => Math.round(c * 0.72 * 255));
+      void light;
+      void dr;
+      void dg;
+      void db;
+      b.el.style.color = '';
       // The ring: the seat's deep ink inside a brushed ensō, the numeral ivory (readable on any wash).
-      b.ring.style.backgroundImage = ringImage(pal, b.variant);
       b.lastInk = pal.id;
     }
     if (pop) this.pop(id);
@@ -529,21 +515,28 @@ export class Overlay {
     return [(this.v.x * 0.5 + 0.5) * this.width, (-this.v.y * 0.5 + 0.5) * this.height];
   }
 
-  /**
-   * Ring diameter for a figure `figH` px tall: ~0.74 of the soldier's height (≈ 30 px at the 1440 home),
-   * never under 22 px (20 on phones) × the text size, and never over 38.
-   */
+  /** Kept for callers of the old API: the piece's nominal size for a figure `figH` px tall. */
   plaqueH(figH: number): number {
     const soft = 1 + (this._ui - 1) * 0.8;
     return Math.max(this.minPlaque * soft, Math.min(38 * soft, figH * 0.74));
   }
-  /** Rings are round; a 3-digit count gets a slightly wider ring. */
-  private plaqueW(h: number, digits: number): number {
-    return digits >= 3 ? h * 1.18 : h;
+  /**
+   * The numeral's size on a top face `h` × `w` px (the inlay is 70 % of it): as large as the inlay allows,
+   * never under 11 px (PLAN §1: the close read stays legible on phones) × the text size.
+   */
+  private numeralPx(h: number, w: number, digits: number): number {
+    const soft = 1 + (this._ui - 1) * 0.8;
+    const byH = h * 0.92;
+    const byW = (w * 0.7) / (digits >= 3 ? 1.5 : digits === 2 ? 1.05 : 0.62);
+    return Math.max(11 * soft, Math.min(byH, byW, 22 * soft));
   }
-  /** Where the ring sits for a figure (container px): beside it, to its right, its foot at the figure's. */
-  private ringAt(fx: number, fy: number, hwPx: number, figH: number, d: number): [number, number] {
-    return [fx + hwPx + d * 0.36, fy - Math.max(d * 0.5, figH * 0.3) + d * 0.08];
+  /** A disc's diameter on screen (px) at a base point, from its world radius. */
+  private discPx(base: THREE.Vector3, r: number, camera: THREE.Camera): number {
+    this.v.copy(base).project(camera);
+    const x0 = this.v.x;
+    const y0 = this.v.y;
+    this.v2.copy(base).addScaledVector(this.right, r).project(camera);
+    return 2 * Math.hypot((this.v2.x - x0) * 0.5 * this.width, (this.v2.y - y0) * 0.5 * this.height);
   }
 
   /**
@@ -582,34 +575,32 @@ export class Overlay {
     const list = this.badgeList;
     const n = list.length;
     const P = this.pos;
+    this.right.setFromMatrixColumn(camera.matrixWorld, 0);
     for (let i = 0; i < n; i++) {
       const b = list[i];
       const feet = this.tokens.top(b.id);
       const top = this.tokens.figTop(b.id);
-      const [x, y, fh, z] = this.figure(feet, top, camera);
-      // the soldier's height sets the ring size for every figure (a cannon is squat, its count isn't)
-      const ph = this.plaqueH(fh * (this.tokens.figH[0] / Math.max(0.01, this.tokens.figH[this.tokens.denom(b.id)])));
-      const upx = fh / Math.max(0.01, feet.distanceTo(top));
-      const hw = this.tokens.halfWidth(b.id) * upx;
-      const [px, py] = this.ringAt(x, y, hw, fh, ph);
+      const [x, y, , z] = this.figure(feet, top, camera);
+      // the numeral sits on the top face: its centre, the disc's width and the face's height on screen
+      const [tx, ty] = this.proj(top, camera);
+      const dpx = this.discPx(feet, this.tokens.halfWidth(b.id), camera);
+      const ph = dpx * DISC_E;
       b.cx = x;
       b.cy = y;
-      b.diam = ph;
+      b.diam = dpx;
       b.x = x + rect.left;
       b.y = y + rect.top;
       b.onScreen = z < 1 && x > -20 && x < W + 20 && y > -20 && y < H + 20;
-      const digits = String(Math.max(0, b.shown)).length;
       const o = i * 6;
-      P[o] = px;
-      P[o + 1] = py;
-      P[o + 2] = this.plaqueW(ph, digits);
+      P[o] = tx;
+      P[o + 1] = ty;
+      P[o + 2] = dpx;
       P[o + 3] = ph;
-      P[o + 4] = y - fh;
+      P[o + 4] = ty - ph / 2;
       P[o + 5] = b.visible && b.onScreen && this.tokens.visual(b.id) >= 0.05 ? 1 : 0;
-      // (the figure's own half-width, for the box below)
-      this.hw[i] = hw;
+      this.hw[i] = dpx / 2;
     }
-    if (this.relax) this.relaxPlaques(n);
+    // (Numerals are painted on their stacks: they never move off them, so the phone nudge is off.)
     for (let i = 0; i < n; i++) {
       const b = list[i];
       const o = i * 6;
@@ -626,8 +617,8 @@ export class Overlay {
       b.ph = ph;
       b.pw = pw;
       const hw = this.hw[i];
-      // The piece: the figure (feet to head, its width) and its ring.
-      b.box = [Math.min(x - hw, px - pw / 2), Math.min(fy, py - ph / 2), Math.max(x + hw, px + pw / 2), Math.max(b.cy + 3, py + ph / 2)];
+      // The piece: the stack, from its top face to the front of its base disc.
+      b.box = [x - hw, fy, x + hw, b.cy + ph / 2];
       if (!b.visible) {
         if (b.hideAt && now >= b.hideAt) {
           b.hideAt = 0;
@@ -655,7 +646,7 @@ export class Overlay {
         b.lastD = hq;
         b.lastW = wq;
         b.lastDigits = digits;
-        const fs = hq * (digits >= 3 ? 0.56 : digits === 2 ? 0.66 : 0.72);
+        const fs = this.numeralPx(hq, wq, digits);
         b.el.style.width = `${wq}px`;
         b.el.style.height = `${hq}px`;
         b.el.style.fontSize = `${Math.round(fs * 2) / 2}px`;
@@ -736,22 +727,19 @@ export class Overlay {
         e.num.textContent = String(tr.n);
         e.lastD = 0;
       }
-      if (e.owner !== tr.owner) {
-        e.owner = tr.owner;
-        const pal = PLAYER_COLORS[tr.owner as keyof typeof PLAYER_COLORS];
-        e.ring.style.backgroundImage = pal ? ringImage(pal, i % RING_VARIANTS) : 'none';
-      }
-      const [fx, fy, fh] = this.figure(tr.top, tr.figTop, camera);
-      const h = Math.round(this.plaqueH(fh * (this.tokens.figH[0] / this.tokens.figH[tr.denom])) * 2) / 2;
-      const upx = fh / Math.max(0.01, tr.top.distanceTo(tr.figTop));
-      const [x, y] = this.ringAt(fx, fy, tr.halfW * upx, fh, h);
+      if (e.owner !== tr.owner) e.owner = tr.owner;
+      // the walking stack's numeral rides on its top face
+      this.right.setFromMatrixColumn(camera.matrixWorld, 0);
+      const [x, y] = this.proj(tr.figTop, camera);
+      const dpx = this.discPx(tr.top, tr.halfW, camera);
+      const h = Math.round(dpx * DISC_E * 2) / 2;
       const digits = String(tr.n).length;
-      const w = Math.round(this.plaqueW(h, digits) * 2) / 2;
+      const w = Math.round(dpx * 2) / 2;
       if (h !== e.lastD) {
         e.lastD = h;
         e.el.style.width = `${w}px`;
         e.el.style.height = `${h}px`;
-        e.el.style.fontSize = `${Math.round(h * (digits >= 3 ? 0.56 : digits === 2 ? 0.66 : 0.72) * 2) / 2}px`;
+        e.el.style.fontSize = `${Math.round(this.numeralPx(h, w, digits) * 2) / 2}px`;
       }
       const t = `translate3d(${snap(x - w / 2, r)}px,${snap(y - h / 2, r)}px,0)`;
       if (t !== e.lastT || e.el.style.visibility !== 'visible') {

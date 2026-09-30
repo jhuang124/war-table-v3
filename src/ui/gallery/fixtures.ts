@@ -178,13 +178,13 @@ const CARDS: CardsVM = {
 };
 
 const LOG: LogLineVM[] = [
-  { id: 1, round: 6, seat: AMBER, kind: 'engagement', text: 'Ochre blitzed Siam from India: 9 vs 3 → took it, lost 2' },
+  { id: 1, round: 6, seat: AMBER, kind: 'engagement', text: 'Ochre took Siam from India · 9 vs 3 · lost 2' },
   { id: 2, round: 6, seat: AMBER, kind: 'continent', text: 'Ochre holds Australia · +2 a turn' },
-  { id: 3, round: 6, seat: EMERALD, kind: 'engagement', text: 'Sage attacked Ukraine from Scandinavia: 4 vs 2 → Slate held, Sage lost 3 · an upset (Sage had 76%)' },
+  { id: 3, round: 6, seat: EMERALD, kind: 'engagement', text: 'Slate held Ukraine against Sage · 4 vs 2 · Sage lost 3 · an upset (Sage had 76%)' },
   { id: 4, round: 7, seat: JOHN, kind: 'turn', text: "Round 7 · John's turn · +9" },
   { id: 5, round: 7, seat: JOHN, kind: 'recap', text: 'Ochre took Siam and India from you' },
   { id: 6, round: 7, seat: JOHN, kind: 'card', text: 'John traded 3 cards for +8' },
-  { id: 7, round: 7, seat: JOHN, kind: 'engagement', text: 'John blitzed Siberia from Ural: 12 vs 5 → took it, lost 3' },
+  { id: 7, round: 7, seat: JOHN, kind: 'engagement', text: 'John took Siberia from Ural · 12 vs 5 · lost 3' },
 ];
 
 export const BASE_GAME: GameVM = {

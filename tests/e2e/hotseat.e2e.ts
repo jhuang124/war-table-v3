@@ -32,13 +32,21 @@ for (let guard = 0; guard < 40; guard++) {
   await page.waitForFunction(
     () => {
       const s = window.__risk.getState();
+      // (v3: the first main turn opens with the cup passing between the two humans: the cover waits)
+      if (s && s.phase.kind !== 'setup-place' && document.querySelector('[data-testid="handoff"]')) return true;
       return !!s && window.__risk.isIdle() && (s.phase.kind !== 'setup-place' || s.players[s.currentPlayer].kind === 'human');
     },
     null,
     { timeout: 60_000 },
   );
-  await rendered(page);
   const s = await state(page);
+  if (s && s.phase.kind !== 'setup-place' && (await page.locator('[data-testid="handoff"]').count())) {
+    await page.waitForTimeout(300);
+    await clickBtn(page, 'handoff-accept');
+    await idle(page);
+    break;
+  }
+  await rendered(page);
   if (!s || s.phase.kind !== 'setup-place') break;
   if (await page.locator('[data-testid="handoff"]').count()) sawCoverInSetup = true;
   const toPlace = s.phase.toPlace;
@@ -99,9 +107,9 @@ await rendered(page);
 await seg(page, 'endTurn'); // straight from Attack: skips fortify
 await page.waitForSelector('[data-testid="handoff"]', { timeout: 3000 });
 const cover = await page.locator('[data-testid="handoff"]').textContent();
-check(/Pass to Sam/.test(cover ?? '') && /armies waiting · 2 cards/.test(cover ?? ''), `cover: ${cover?.replace(/\s+/g, ' ').trim()}`, results);
+check(/Pass the cup to Sam/.test(cover ?? '') && /armies waiting · 2 cards/.test(cover ?? ''), `cover: ${cover?.replace(/\s+/g, ' ').trim()}`, results);
 const handHidden = await page.evaluate(() => window.__risk.ui().line);
-check(handHidden === 'Pass to Sam', `the line under the cover: ${handHidden}`, results);
+check(handHidden === 'Pass the cup to Sam', `the line under the cover: ${handHidden}`, results);
 const turnBannerBefore = (await ui(page)).banners.filter((b) => b.endsWith('TURN'));
 check(turnBannerBefore.length === 0 || !turnBannerBefore[0].startsWith('SAM'), 'turnStarted waits for the cover', results);
 await clickBtn(page, 'handoff-accept');
@@ -111,7 +119,7 @@ const afterCover = await ui(page);
 check(afterCover.banners.some((b) => b.startsWith("SAM'S TURN · +")), `after the cover: ${afterCover.banners.join(' | ')}`, results);
 await page.evaluate(() => {
   const s = JSON.parse(localStorage.getItem('risk3d.settings.v1') ?? '{}');
-  localStorage.setItem('risk3d.settings.v1', JSON.stringify({ ...s, hideCardsBetweenTurns: false }));
+  localStorage.setItem('risk3d.settings.v1', JSON.stringify({ ...s, hideCardsBetweenTurns: false, v: 5 }));
 });
 
 // --- Forced trade at 5 cards -------------------------------------------------------------------------
