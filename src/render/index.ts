@@ -2158,10 +2158,10 @@ export const createBoardView: CreateBoardView = async (opts: BoardViewOptions): 
     // sides. (The HUD's header line is centred and short; southern pieces near the tray's ends sit beside it.)
     const clear = 6 * uiScale;
     rig.trayKeepOut = { x0: W / 2 - g.trayW / 2 - 12, x1: W / 2 + g.trayW / 2 + 12, y0: H - insets.bottom - kb + (kb - g.trayH) / 2 - clear };
-    // The stones are sized in CSS px at the home view (14 → 36 px at 1440×900; phones 12 → 24), so their
+    // The stones are sized in CSS px at the home view (14 → 36 px at 1440×900; phones 15.5 → 26, so a 1-army numeral is ≥ 11 px without the floor), so their
     // board size follows the home scale: fit, size, fit again.
-    tokens.dminPx = compact ? 12 : 14;
-    tokens.dmaxPx = compact ? 24 : 36;
+    tokens.dminPx = compact ? 15.5 : 14;
+    tokens.dmaxPx = compact ? 26 : 36;
     for (let it = 0; it < 3; it++) {
       setPieceExtents();
       rig.recomputeHome();

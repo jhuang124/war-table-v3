@@ -323,8 +323,8 @@ vec3 coastColor(float id, vec2 bp, out float glow) {
   return c;
 }
 
-// The printed continents (PLAN §2): each continent's halo of sea takes its faint paper tint (sea = 1 over
-// water), and one heavy line bounds it: silver, or the holder's ink while it is held, swept round clockwise
+// The printed continents (PLAN §2): a thin band of sea along each continent's shores takes its faint paper tint
+// (sea = the band's weight, 0 elsewhere), and one heavy line bounds it: silver, or the holder's ink while it is held, swept round clockwise
 // from north as it is taken (uContSweep: centre, progress, amount).
 const float CONT_DR = 1.2;
 vec3 continentInk(vec3 c, vec2 bp, float sea) {
@@ -334,11 +334,11 @@ vec3 continentInk(vec3 c, vec2 bp, float sea) {
   vec4 kn = texelFetch(uCont, ivec2(uv * uFieldSize), 0);
   int own = int(kn.g * 255.0 + 0.5);
   // the region's paper tint: the continent's hue at the paper's own lightness (a zone, never a glow)
-  if (own < 6 && sea > 0.5) {
+  if (own < 6 && sea > 0.001) {
     vec3 t = uContTint[own];
     float lc = dot(c, vec3(0.299, 0.587, 0.114));
     float lt = max(dot(t, vec3(0.299, 0.587, 0.114)), 1e-3);
-    c = max(c + (t - vec3(lt)) * 0.2 + 0.012, vec3(0.0));
+    c = max(c + ((t - vec3(lt)) * 0.2 + 0.012) * sea, vec3(0.0));
   }
   float d = k.r * CONT_DR;
   float aa = max(fwidth(d), 1e-4);
@@ -407,7 +407,8 @@ void main() {
     vec3 cc = coastColor(id, bp, glow);
     c = mix(c, uInkCoast * 0.96, k.b * 0.55);
     c = mix(c, cc, clamp(k.r * (1.0 + 0.5 * glow), 0.0, 1.0) * 0.92);
-    c = continentInk(c, bp, 1.0 - f.a);
+    // the tint: a thin shore band only (~0.3 units out); water the outline encloses stays paper
+    c = continentInk(c, bp, (1.0 - f.a) * (1.0 - smoothstep(0.15, 0.32, seaD)));
     float sh = max(liftShadow(bp, uLiftA, -1.0), liftShadow(bp, uLiftB, -1.0));
     c *= 1.0 - 0.34 * sh;
   }
