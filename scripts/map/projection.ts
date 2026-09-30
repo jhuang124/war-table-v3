@@ -1,55 +1,132 @@
-// Projection + smooth regional magnification ("lenses") for the board.
+// Projections + smooth regional magnification ("lenses") for a board. A pack recipe
+// (scripts/map/packs/<id>/) picks a base projection and a list of lenses.
 //
-// Base: Miller cylindrical (k = 0.8), Pacific seam. Longitudes are unwrapped into
-// [LON_LEFT, LON_LEFT + 360] and squeezed into [MARGIN_X, WIDTH - MARGIN_X] so that the
-// Bering Strait land tips sit a little inside the left/right board edges (the
-// Alaska–Kamchatka lane runs off one edge and back in on the other).
+// Base projections map (lon, lat) to raw board units, with longitudes unwrapped into the board's
+// window [lonLeft, lonLeft + 360] (the seam is at lonLeft):
+//   miller   — Miller cylindrical (k = 0.8), squeezed into [marginX, width - marginX] (classic).
+//   pseudo   — a pseudocylindrical d3-geo raw projection (true-world: Equal Earth), centred opposite the
+//              seam, scaled so a chosen share of the equator spans the board, cropped to a latitude window.
 //
 // Lenses: elliptical radial maps r -> f(r) that are monotone along every ray from the
 // lens centre (f(0)=0, f' > 0, f(r)=r outside the lens). Each lens is therefore a
 // bijection of the plane, so composing them can never create or destroy land contacts:
 // topology is preserved, only sizes change.
 
-export const WIDTH = 100;
-export const LON_LEFT = -169.2;
-export const MARGIN_X = 2.4;
-export const LAT_BOTTOM = -56.2;
-export const LAT_TOP = 83.8;
-export const MARGIN_BOTTOM = 1.4;
-export const MARGIN_TOP = 1.2;
+import type { GeoRawProjection } from 'd3-geo';
 
-const SX = (WIDTH - 2 * MARGIN_X) / 360; // board units per degree of longitude
-const RAD_SCALE = (SX * 180) / Math.PI; // board units per radian
+export interface BaseProjection {
+  /** Board width (units). */
+  width: number;
+  /** Raw board height before rounding (units). */
+  rawHeight: number;
+  /** Western edge of the longitude window (the seam). */
+  lonLeft: number;
+  /** lon (already unwrapped into the window) / lat → raw board units. */
+  forward(lon: number, lat: number): [number, number];
+  inverse(x: number, y: number): [number, number];
+}
 
-const millerY = (latDeg: number) => {
-  const phi = (latDeg * Math.PI) / 180;
-  return 1.25 * Math.log(Math.tan(Math.PI / 4 + 0.4 * phi));
-};
-const millerLat = (y: number) => ((Math.atan(Math.exp(y / 1.25)) - Math.PI / 4) / 0.4) * (180 / Math.PI);
-
-const Y0 = millerY(LAT_BOTTOM);
-
-/** Unwrap a longitude into the board's window. */
-export function unwrapLon(lon: number): number {
+/** Unwrap a longitude into [lonLeft, lonLeft + 360). */
+export function unwrapLonFrom(lonLeft: number, lon: number): number {
   let l = lon;
-  while (l < LON_LEFT) l += 360;
-  while (l >= LON_LEFT + 360) l -= 360;
+  while (l < lonLeft) l += 360;
+  while (l >= lonLeft + 360) l -= 360;
   return l;
 }
 
-export function projectRaw(lon: number, lat: number): [number, number] {
-  const x = MARGIN_X + (lon - LON_LEFT) * SX;
-  const y = MARGIN_BOTTOM + (millerY(lat) - Y0) * RAD_SCALE;
-  return [x, y];
+export interface MillerParams {
+  width: number;
+  lonLeft: number;
+  marginX: number;
+  latBottom: number;
+  latTop: number;
+  marginBottom: number;
+  marginTop: number;
 }
 
-export function unprojectRaw(x: number, y: number): [number, number] {
-  const lon = (x - MARGIN_X) / SX + LON_LEFT;
-  const lat = millerLat((y - MARGIN_BOTTOM) / RAD_SCALE + Y0);
-  return [lon, lat];
+/** Miller cylindrical, Pacific seam: the classic board's base. */
+export function millerBase(p: MillerParams): BaseProjection {
+  const WIDTH = p.width, LON_LEFT = p.lonLeft, MARGIN_X = p.marginX;
+  const LAT_BOTTOM = p.latBottom, LAT_TOP = p.latTop, MARGIN_BOTTOM = p.marginBottom, MARGIN_TOP = p.marginTop;
+  const SX = (WIDTH - 2 * MARGIN_X) / 360; // board units per degree of longitude
+  const RAD_SCALE = (SX * 180) / Math.PI; // board units per radian
+  const millerY = (latDeg: number) => {
+    const phi = (latDeg * Math.PI) / 180;
+    return 1.25 * Math.log(Math.tan(Math.PI / 4 + 0.4 * phi));
+  };
+  const millerLat = (y: number) => ((Math.atan(Math.exp(y / 1.25)) - Math.PI / 4) / 0.4) * (180 / Math.PI);
+  const Y0 = millerY(LAT_BOTTOM);
+  return {
+    width: WIDTH,
+    lonLeft: LON_LEFT,
+    rawHeight: MARGIN_BOTTOM + (millerY(LAT_TOP) - Y0) * RAD_SCALE + MARGIN_TOP,
+    forward(lon, lat) {
+      const x = MARGIN_X + (lon - LON_LEFT) * SX;
+      const y = MARGIN_BOTTOM + (millerY(lat) - Y0) * RAD_SCALE;
+      return [x, y];
+    },
+    inverse(x, y) {
+      const lon = (x - MARGIN_X) / SX + LON_LEFT;
+      const lat = millerLat((y - MARGIN_BOTTOM) / RAD_SCALE + Y0);
+      return [lon, lat];
+    },
+  };
 }
 
-export const RAW_HEIGHT = MARGIN_BOTTOM + (millerY(LAT_TOP) - Y0) * RAD_SCALE + MARGIN_TOP;
+export interface PseudoParams {
+  width: number;
+  lonLeft: number;
+  /**
+   * How much of the globe the board's width shows: the equator's half-length that maps onto half the
+   * board (1 = the whole equator edge to edge; less crops the empty mid-Pacific at the sides).
+   */
+  span: number;
+  /**
+   * Straighten the meridians toward the sides: x = λ·(edge·g(0) + (1 − edge)·g(φ)) instead of λ·g(φ).
+   * 0 = the projection as designed (equal-area for Equal Earth); 0.3 widens the far north by up to ~10%.
+   */
+  edge?: number;
+  latBottom: number;
+  latTop: number;
+  marginBottom: number;
+  marginTop: number;
+  /** Uniform vertical scale after projecting (1 = the projection's own proportions). */
+  yScale?: number;
+}
+
+/**
+ * A pseudocylindrical d3 raw projection (Equal Earth, Natural Earth I: straight parallels, x linear in
+ * λ) as a board base. The central meridian is lonLeft + 180; +y north; latBottom sits at marginBottom.
+ */
+export function pseudoBase(raw: GeoRawProjection, p: PseudoParams): BaseProjection {
+  const central = p.lonLeft + 180;
+  const D = Math.PI / 180;
+  const edge = p.edge ?? 0;
+  const g = (phi: number) => raw(1, phi)[0]; // x per radian of λ at latitude phi
+  const g0 = g(0);
+  const fx = (phi: number) => edge * g0 + (1 - edge) * g(phi);
+  const yOf = (phi: number) => raw(0, phi)[1];
+  const k = p.width / 2 / (g0 * Math.PI * p.span); // board units per projection unit
+  const yb = yOf(p.latBottom * D), yt = yOf(p.latTop * D);
+  const X0 = p.width / 2;
+  const ky = k * (p.yScale ?? 1);
+  return {
+    width: p.width,
+    lonLeft: p.lonLeft,
+    rawHeight: p.marginBottom + (yt - yb) * ky + p.marginTop,
+    forward(lon, lat) {
+      const phi = lat * D;
+      return [X0 + (lon - central) * D * fx(phi) * k, p.marginBottom + (yOf(phi) - yb) * ky];
+    },
+    inverse(x, y) {
+      const py = (y - p.marginBottom) / ky + yb;
+      const r = raw.invert!(0, py);
+      const phi = r[1];
+      const lam = (x - X0) / k / fx(phi);
+      return [central + lam / D, phi / D];
+    },
+  };
+}
 
 export interface LensSpec {
   name: string;
@@ -132,29 +209,36 @@ export class Lens {
   }
 }
 
+/** A base projection with lenses composed on top: what the pipeline projects through. */
 export class BoardProjection {
+  base: BaseProjection;
   lenses: Lens[];
+  width: number;
   height: number;
-  /** Final affine: board = raw-lensed * 1 (kept for clarity; vertical scale may be tuned). */
-  constructor(specs: LensSpec[]) {
+  constructor(base: BaseProjection, specs: LensSpec[]) {
+    this.base = base;
     this.lenses = [];
     for (const s of specs) {
       // Lens centres are specified in lon/lat and placed after the previous lenses.
-      let c = projectRaw(unwrapLon(s.lon), s.lat);
+      let c = base.forward(this.unwrapLon(s.lon), s.lat);
       for (const l of this.lenses) c = l.apply(c[0], c[1]);
       this.lenses.push(new Lens(s, c));
     }
-    this.height = RAW_HEIGHT;
+    this.width = base.width;
+    this.height = base.rawHeight;
+  }
+  unwrapLon(lon: number): number {
+    return unwrapLonFrom(this.base.lonLeft, lon);
   }
   /** lon (already unwrapped) / lat → board. */
   forward(lon: number, lat: number): [number, number] {
-    let p = projectRaw(lon, lat);
+    let p = this.base.forward(lon, lat);
     for (const l of this.lenses) p = l.apply(p[0], p[1]);
     return p;
   }
   inverse(x: number, y: number): [number, number] {
     let p: [number, number] = [x, y];
     for (let i = this.lenses.length - 1; i >= 0; i--) p = this.lenses[i].invert(p[0], p[1]);
-    return unprojectRaw(p[0], p[1]);
+    return this.base.inverse(p[0], p[1]);
   }
 }

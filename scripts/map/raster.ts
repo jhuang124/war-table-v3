@@ -1,12 +1,13 @@
 // Label raster used to build a clean planar partition of the board.
 // Pixel (i, r) covers board x ∈ [i/PX, (i+1)/PX], y ∈ [r/PX, (r+1)/PX]; row 0 is the bottom.
-// Label 0 = ocean, 1..42 = territories (TERRITORY_IDS order + 1), DECOR = 43, IRELAND = 44 (a second
-// Great Britain label so Ireland keeps its own coastline instead of fusing onto Britain).
+// Label 0 = ocean, 1..N = territories (the pack's rules.json order + 1), N + 1 = decorative land, then
+// one label per recipe alias (classic: Ireland, a second Great Britain label so Ireland keeps its own
+// coastline instead of fusing onto Britain). Labels are bytes: at most 255 in all.
+// scripts/map/pipeline.ts assigns them.
 
 export const OCEAN = 0;
-export const DECOR = 43;
-export const IRELAND = 44;
-export const NLABELS = 45;
+/** Size of every per-label table (labels are Uint8). */
+export const MAX_LABELS = 256;
 
 export class Grid {
   w: number;
@@ -125,7 +126,7 @@ export interface Bbox {
 }
 
 export function labelBboxes(g: Grid): (Bbox | null)[] {
-  const bb: (Bbox | null)[] = new Array(NLABELS).fill(null);
+  const bb: (Bbox | null)[] = new Array(MAX_LABELS).fill(null);
   for (let r = 0; r < g.h; r++)
     for (let i = 0; i < g.w; i++) {
       const l = g.lab[r * g.w + i];

@@ -1,7 +1,8 @@
-// Tunables for the board: lenses, island exaggeration, sea lanes, label hints.
+// Classic recipe tunables: lenses, island exaggeration, label hints. (Which borders are sea lanes is
+// maps/classic/topology.json; the recipe only says how to draw them.)
 
-import type { ContinentId, TerritoryId } from '../../src/engine/types';
-import type { LensSpec } from './projection';
+import type { ContinentId, TerritoryId } from '../../../../src/engine/types';
+import type { LensSpec } from '../../projection';
 
 /** Raster resolution (pixels per board unit). */
 export const PX = 20;
@@ -58,42 +59,6 @@ export const AUTO_FATTEN: TerritoryId[] = [
   'iceland', 'great_britain', 'japan', 'madagascar', 'new_guinea', 'indonesia', 'central_america',
   'siam', 'scandinavia', 'western_europe', 'southern_europe', 'northern_europe', 'eastern_australia',
   'western_australia', 'egypt', 'venezuela', 'peru',
-];
-
-export interface LaneSpec {
-  a: TerritoryId;
-  b: TerritoryId;
-  /** Optional lon/lat hints: the lane starts at the coast point of a (b) nearest the hint. */
-  ha?: [number, number];
-  hb?: [number, number];
-}
-
-export const SEA_LANES: LaneSpec[] = [
-  { a: 'alaska', b: 'kamchatka' }, // wraps the board edge
-  { a: 'northwest_territory', b: 'greenland' },
-  { a: 'greenland', b: 'ontario' },
-  { a: 'greenland', b: 'quebec' },
-  { a: 'greenland', b: 'iceland' },
-  { a: 'brazil', b: 'north_africa' },
-  { a: 'iceland', b: 'great_britain' },
-  { a: 'iceland', b: 'scandinavia' },
-  { a: 'scandinavia', b: 'great_britain' },
-  { a: 'scandinavia', b: 'northern_europe' },
-  { a: 'great_britain', b: 'northern_europe' },
-  { a: 'great_britain', b: 'western_europe' },
-  { a: 'western_europe', b: 'north_africa' },
-  { a: 'southern_europe', b: 'egypt' },
-  { a: 'southern_europe', b: 'north_africa' },
-  { a: 'east_africa', b: 'madagascar' },
-  { a: 'south_africa', b: 'madagascar' },
-  { a: 'east_africa', b: 'middle_east' },
-  { a: 'kamchatka', b: 'japan' },
-  { a: 'mongolia', b: 'japan' },
-  { a: 'siam', b: 'indonesia' },
-  { a: 'indonesia', b: 'new_guinea' },
-  { a: 'indonesia', b: 'western_australia' },
-  { a: 'new_guinea', b: 'eastern_australia' },
-  { a: 'new_guinea', b: 'western_australia' },
 ];
 
 export const CONTINENT_LABEL_HINTS: Record<ContinentId, [number, number]> = {

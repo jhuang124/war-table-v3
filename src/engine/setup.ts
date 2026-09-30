@@ -2,7 +2,7 @@
 
 import { buildDeck } from './cards';
 import { afterTerritoriesAssigned, emit, setPhase, updatePeak, type Draft } from './flow';
-import { STARTING_ARMIES, TERRITORY_IDS } from './mapData';
+import { STARTING_ARMIES, TERRITORY_IDS, mapIdOf } from './mapData';
 import { randInt, shuffleInPlace, toSeed } from './rng';
 import {
   UNCLAIMED,
@@ -78,6 +78,8 @@ export function sanitizeConfig(config: GameConfig): GameConfig {
     seed: toSeed(int(config.seed, 0)),
   };
   if (config.startingArmies !== undefined) out.startingArmies = Math.max(minArmies, int(config.startingArmies, minArmies));
+  // Map packs (docs/MAPS.md): keep the map so the save carries it; an unknown id plays classic.
+  if (typeof config.mapId === 'string' && config.mapId) out.mapId = mapIdOf(config.mapId);
   return out;
 }
 
