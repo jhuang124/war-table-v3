@@ -1,11 +1,13 @@
 // SVG preview of a board (continent colours with per-territory tints, badge circles, names, lanes,
-// labels) + Playwright screenshots into artifacts/map/<id>/, and the pack's small thumbnail.
+// labels) + Playwright screenshots into artifacts/map/<id>/, and the pack's small thumbnail (an ink drawing
+// of the board for the New-game picker, thumbSvg).
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { BoardGeometry, PolygonGeom } from '../../src/map/types';
 import type { LoadedPack } from './pack';
 import type { PreviewShot } from './recipe';
+import { CONTINENT_TINTS } from '../../src/shared/palette';
 
 type Hsl = [number, number, number];
 const CONT_COLORS: Record<string, Hsl> = {
@@ -113,6 +115,54 @@ export function boardSvg(
   return parts.join('\n');
 }
 
+// --- The New-game thumbnail (v3): the board as a small ink drawing -------------------------------------
+// Indigo paper, ivory coastlines with a faint feathered halo, each continent's land in a faint wash of its
+// printed tint (src/shared/palette.ts CONTINENT_TINTS), territory borders as hairlines, the crossings as
+// fainter hairlines. No seat fills, no labels, no badges: drawn in the board's hand, not as a chart.
+const PAPER = '#101a30';
+const IVORY = '#f2ede2';
+const mixHex = (a: string, b: string, k: number) => {
+  const p = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const x = p(a);
+  const y = p(b);
+  return `#${x.map((v, i) => Math.round(v + (y[i] - v) * k).toString(16).padStart(2, '0')).join('')}`;
+};
+
+export function thumbSvg(b: BoardGeometry, pack: LoadedPack, pxWidth: number): string {
+  const H = b.height;
+  const pxH = Math.round((pxWidth * b.height) / b.width);
+  const u = b.width / pxWidth; // board units per output px
+  const ids = pack.territoryIds as TKey[];
+  const land = mixHex(PAPER, IVORY, 0.07);
+  const fillOf = (c: string) => {
+    const i = Math.max(0, pack.rules.continents.findIndex((x) => x.id === c));
+    return mixHex(land, CONTINENT_TINTS[i % CONTINENT_TINTS.length], 0.34);
+  };
+  const all = ids.flatMap((t) => b.territories[t].polygons.map((pg) => ({ t, d: pathOf(pg, H) })));
+  const parts: string[] = [];
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${pxWidth}" height="${pxH}" viewBox="0 0 ${b.width} ${b.height}">`);
+  parts.push(
+    `<defs><filter id="feather" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="${(1.6 * u).toFixed(3)}"/></filter>` +
+      `<radialGradient id="vig" cx="50%" cy="46%" r="70%"><stop offset="0.6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.35"/></radialGradient></defs>`,
+  );
+  parts.push(`<rect x="0" y="0" width="${b.width}" height="${b.height}" fill="${PAPER}"/>`);
+  for (const pg of b.decorativeLand) parts.push(`<path d="${pathOf(pg, H)}" fill="${land}" stroke="${IVORY}" stroke-opacity="0.35" stroke-width="${(0.8 * u).toFixed(3)}" fill-rule="evenodd"/>`);
+  // the coast: a feathered halo, then the ivory line; the land fills then cover the inner half of every
+  // stroke, so only the outer coast survives (a shared border is covered from both sides)
+  parts.push(`<g filter="url(#feather)" opacity="0.28">${all.map((x) => `<path d="${x.d}" fill="none" stroke="${IVORY}" stroke-width="${(5 * u).toFixed(3)}" stroke-linejoin="round"/>`).join('')}</g>`);
+  parts.push(`<g>${all.map((x) => `<path d="${x.d}" fill="none" stroke="${IVORY}" stroke-opacity="0.92" stroke-width="${(2.6 * u).toFixed(3)}" stroke-linejoin="round"/>`).join('')}</g>`);
+  parts.push(`<g>${all.map((x) => `<path d="${x.d}" fill="${fillOf(pack.continentOf[x.t])}" fill-rule="evenodd"/>`).join('')}</g>`);
+  // territory borders, hairline
+  parts.push(`<g>${all.map((x) => `<path d="${x.d}" fill="none" stroke="${IVORY}" stroke-opacity="0.2" stroke-width="${(0.6 * u).toFixed(3)}" stroke-linejoin="round"/>`).join('')}</g>`);
+  // the crossings, fainter still
+  for (const lane of b.seaLanes)
+    for (const seg of lane.segments)
+      parts.push(`<polyline points="${seg.map(([x, y]) => `${x},${H - y}`).join(' ')}" fill="none" stroke="${IVORY}" stroke-opacity="0.3" stroke-width="${(0.7 * u).toFixed(3)}" stroke-linecap="round"/>`);
+  parts.push(`<rect x="0" y="0" width="${b.width}" height="${b.height}" fill="url(#vig)"/>`);
+  parts.push('</svg>');
+  return parts.join('\n');
+}
+
 export interface PreviewOpts {
   outDir: string;
   minClear: number;
@@ -164,7 +214,8 @@ export async function renderPreviews(b: BoardGeometry, pack: LoadedPack, o: Prev
   try {
     const page = await browser.newPage({ deviceScaleFactor: 1 });
     for (const s of shots) {
-      const svg = boardSvg(b, pack, { viewBox: s.viewBox, pxWidth: s.px, minClear: o.minClear, bare: s.bare });
+      // the thumbnail is the ink drawing (thumbSvg); every other shot is the checking preview
+      const svg = s.bare ? thumbSvg(b, pack, s.px) : boardSvg(b, pack, { viewBox: s.viewBox, pxWidth: s.px, minClear: o.minClear, bare: s.bare });
       if (!s.bare) writeFileSync(s.path.replace(/\.png$/, '.svg'), svg);
       const m = /height="(\d+)"/.exec(svg)!;
       await page.setViewportSize({ width: s.px, height: Number(m[1]) });

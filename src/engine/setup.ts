@@ -172,11 +172,10 @@ export function createGame(inputConfig: GameConfig): { state: GameState; events:
   let open: TerritoryId[] = [...TERRITORY_IDS];
   const neutralId = config.neutral ? n : -1;
   if (config.neutral) {
-    const used = new Set(config.players.map((p) => p.color));
     s.players.push({
       id: neutralId,
       name: NEUTRAL_SETUP.name,
-      color: COLORS.find((c) => !used.has(c)) ?? 'violet',
+      color: 'neutral',
       kind: 'ai',
       neutral: true,
       cards: [],

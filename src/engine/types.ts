@@ -70,7 +70,8 @@ export type PlayerId = number;
 /** Owner value for an unclaimed territory (only during draft setup). */
 export const UNCLAIMED = -1;
 
-export type PlayerColorId = 'crimson' | 'cobalt' | 'emerald' | 'amber' | 'violet' | 'rose';
+/** The six a seat picks, plus (v3, additive) 'neutral': the 2-player neutral seat's grey, never a config colour. */
+export type PlayerColorId = 'crimson' | 'cobalt' | 'emerald' | 'amber' | 'violet' | 'rose' | 'neutral';
 
 export type PlayerKind = 'human' | 'ai';
 export type AiDifficulty = 'easy' | 'normal' | 'hard';

@@ -4,8 +4,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AudioEngine } from '../../src/audio/types';
 import type { BoardView } from '../../src/render/BoardView';
-import { createController, draftConfig, withDraftExtras } from '../../src/game/controller';
-import { defaultDraft, sanitizeDraft } from '../../src/game/presets';
+import { createController } from '../../src/game/controller';
+import { addSeat, defaultDraft, draftToConfig, patchSeat, removeSeat, sanitizeDraft } from '../../src/game/presets';
 import { memoryKV, SAVE_KEY, SETTINGS_KEY } from '../../src/game/storage';
 import type { GameState } from '../../src/engine';
 import { board as fixture } from './fixtures';
@@ -87,38 +87,49 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('New game draft extras (v3)', () => {
+describe('New game draft extras (v3, presets.ts)', () => {
   it('a fresh table has three different AIs, Neutral armies and Truces on, classic', () => {
-    const d = withDraftExtras(defaultDraft());
+    const d = defaultDraft();
     expect(d.seats.map((s) => s.personality)).toEqual([undefined, 'turtle', 'opportunist', 'warlord']);
     expect(d.house.neutral).toBe(true);
     expect(d.house.truces).toBe(true);
     expect(d.mapId).toBe('classic');
   });
 
-  it('survives presets.sanitizeDraft (which drops what it does not know)', () => {
-    const d = withDraftExtras(defaultDraft());
+  it('sanitizeDraft keeps them (and fills a missing personality)', () => {
+    const d = defaultDraft();
     d.seats[1].personality = 'warlord';
     const raw = JSON.parse(JSON.stringify({ ...d, mapId: 'true-world', house: { ...d.house, neutral: false } }));
-    const back = withDraftExtras(sanitizeDraft(raw), raw);
-    expect(back.seats[1].personality).toBe('warlord');
+    delete raw.seats[2].personality;
+    delete raw.house.truces;
+    const back = sanitizeDraft(raw);
+    // seat 2 lost its personality: it takes the least used (Turtle; Warlord is used twice)
+    expect(back.seats.map((s) => s.personality)).toEqual([undefined, 'warlord', 'turtle', 'warlord']);
     expect(back.mapId).toBe('true-world');
     expect(back.house.neutral).toBe(false);
     expect(back.house.truces).toBe(true);
+    expect(sanitizeDraft({ ...raw, mapId: 'atlantis' }).mapId).toBe('classic');
+  });
+
+  it('a seat flipped to AI, or added, gets the least-used personality', () => {
+    const d = patchSeat(defaultDraft(), 0, { kind: 'ai' });
+    expect(d.seats[0].personality).toBe('turtle');
+    const e = addSeat(removeSeat(defaultDraft(), 3));
+    expect(e.seats[3].personality).toBe('warlord');
   });
 
   it('the config carries the map, diplomacy only with a human and a personality AI, neutral for two', () => {
-    const d = withDraftExtras(defaultDraft());
-    const c = draftConfig({ ...d, mapId: 'true-world' }, 5);
+    const d = defaultDraft();
+    const c = draftToConfig({ ...d, mapId: 'true-world' }, 5);
     expect(c.mapId).toBe('true-world');
     expect(c.diplomacy).toBe(true);
     expect(c.players.filter((p) => p.kind === 'ai').map((p) => p.personality)).toEqual(['turtle', 'opportunist', 'warlord']);
-    expect(draftConfig({ ...d, house: { ...d.house, truces: false } }, 5).diplomacy).toBeUndefined();
-    const allAi = withDraftExtras({ ...d, seats: d.seats.map((s) => ({ ...s, kind: 'ai' as const })) });
-    expect(draftConfig(allAi, 5).diplomacy).toBeUndefined();
-    const two = withDraftExtras({ ...d, seats: d.seats.slice(0, 2) });
-    expect(draftConfig(two, 5).neutral).toBe(true);
-    expect(draftConfig(withDraftExtras({ ...two, house: { ...two.house, neutral: false } }), 5).neutral).toBeUndefined();
+    expect(draftToConfig({ ...d, house: { ...d.house, truces: false } }, 5).diplomacy).toBeUndefined();
+    const allAi = { ...d, seats: d.seats.map((s) => ({ ...s, kind: 'ai' as const })) };
+    expect(draftToConfig(allAi, 5).diplomacy).toBeUndefined();
+    const two = removeSeat(removeSeat(d, 3), 2);
+    expect(draftToConfig(two, 5).neutral).toBe(true);
+    expect(draftToConfig({ ...two, house: { ...two.house, neutral: false } }, 5).neutral).toBeUndefined();
   });
 
   it('the New game view offers both maps and the three personalities', () => {

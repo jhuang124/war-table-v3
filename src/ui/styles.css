@@ -854,7 +854,7 @@
 /* A grudge ≥ 2: one short slanted tick in the grudged seat's colour, before the continent ticks. */
 .sc-grudge { margin-right: 0.12rem; }
 /* The 2-player neutral seat: its ring and count, dimmed; never underlined, never the cup. */
-.seat-chip.neutral { opacity: 0.4; }
+.seat-chip.neutral { opacity: 0.6; }
 .seat-chip.neutral .sc-name::after { display: none; }
 /* Choosing a truce partner: the lit rings come up to full ink, a hairline of ivory round them; the rest step back. */
 .ts-seats.picking .seat-chip:not(.truce-target) { opacity: 0.32; }

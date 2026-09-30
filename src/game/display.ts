@@ -13,6 +13,12 @@ export const NON_BLOCKING: ReadonlySet<GameEventType> = new Set<GameEventType>([
   'cardDrawn',
   'controllerChanged',
   'gameStarted',
+  // v3 diplomacy: a sentence in the line and the ledger, nothing on the board to wait for
+  'truceProposed',
+  'truceAccepted',
+  'truceDeclined',
+  'truceBroken',
+  'truceExpired',
 ]);
 
 export function isBlocking(e: GameEvent): boolean {

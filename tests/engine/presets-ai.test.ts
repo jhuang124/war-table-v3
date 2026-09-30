@@ -9,9 +9,14 @@ function twoSeats(): NewGameDraft {
 }
 
 describe('presets: neutral seat and personalities', () => {
-  it('without the new fields, configs are exactly as before', () => {
-    const c = draftToConfig(twoSeats(), 7);
+  it('with the v3 rules switched off and no personalities, configs are as before (plus the map)', () => {
+    const d = twoSeats();
+    d.house = { ...d.house, neutral: false, truces: false };
+    d.seats = d.seats.map(({ personality: _p, ...s }) => (void _p, s));
+    const c = draftToConfig(d, 7);
     expect('neutral' in c).toBe(false);
+    expect('diplomacy' in c).toBe(false);
+    expect(c.mapId).toBe('classic');
     expect(c.players.some((p) => 'personality' in p)).toBe(false);
     expect(lengthRules('evening', 2)).toEqual({ dominationPercent: 80, turnLimit: null });
   });
