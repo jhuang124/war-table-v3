@@ -17,6 +17,9 @@ Contracts already written (read them before anything else):
 | `src/game/viewModel.ts` | Controller ↔ UI: ViewModel (plain data + finished copy), UiIntent, ControllerApi, MountUi |
 | `index.html` | `#board` (canvas container) under `#ui` (HTML overlay); boots `src/main.ts` |
 
+The v3 additions to these contracts (map packs, personalities, truces, grudges, the neutral seat, the
+board's count preview, the ViewModel's new fields) are listed in §11.6; every one is optional.
+
 **Renderer, UI and controller builders: read `docs/UX.md` alongside this spec.** It holds the
 click-by-click turn, the timing table, camera rules, exact copy, and the reviewer rubric. This spec
 says *what*; UX.md says *how it feels*. If they conflict, this spec wins; flag the conflict in your
@@ -722,3 +725,36 @@ fewer log lines and simpler replays.
 - **Test hooks**: dev builds also expose `window.__board` (the BoardView, for its `__debug` layout
   data) and `window.__audio`. `npm run test:e2e` runs every flow in `tests/e2e/` on the real board and
   HUD (own server on :5290).
+
+### 11.6 v3 additive contract fields (AI, Maps, Board, Surfaces; all optional, old saves load unchanged)
+- **`src/engine/types.ts`** (AI + Maps):
+  - `GameConfig.mapId?` — the map pack (`maps/<id>/`; absent = `'classic'`). `GameConfig.diplomacy?` —
+    humans may propose and answer truces (off = truces only between personality AIs). `GameConfig.neutral?`
+    — with exactly 2 players, a third, neutral seat (never takes a turn or wins; victory ignores it).
+  - `PlayerConfig.personality?` / `PlayerState.personality?`: `'turtle' | 'opportunist' | 'warlord'`
+    (`PERSONALITIES` in `src/engine/ai/personality.ts`; unset = the classic AI, which never truces).
+    `PlayerState.neutral?`, `PlayerState.grudges?` (by seat, decaying each round; read with `grudgesOf`),
+    `PlayerState.truceBreaks?`, `GameState.diplomacy?` (truces, pending offers, rebuffs).
+  - Actions: `proposeTruce { player, to, rounds, kind: 'noAttack' }`, `answerTruce { player, from, accept }`
+    (out of turn allowed); `setController.personality?`. Events: `truceProposed`, `truceAccepted`,
+    `truceDeclined` (`reason: 'declined' | 'lapsed'`), `truceBroken`, `truceExpired`; `truceSentence(state,
+    event)` writes each one's plain line. Read helpers: `truceTargets(state, seat, rounds?)`,
+    `truceOffersTo(state, seat)`.
+- **`src/map/types.ts`** (Maps): `SeaLaneGeom.shore?` — the crossing's two shore points `[on a, on b]`;
+  `src/map/registry.ts` `getBoard()` always fills it. The registry (`listMaps`, `getBoard`, `activeMapId`)
+  is the one geometry loader; a page boots one board (`?map=` on dev/e2e builds, else the save's `mapId`,
+  else classic), so the controller starts a game on another map by saving it and reloading.
+- **`src/render/BoardView.ts`** (Board): `setCountPreview?(totals | null)` — ghost stones at the totals a
+  count being chosen would leave (occupy / fortify); the controller sends it when present.
+- **`src/shared/palette.ts`** (Surfaces): `SeatColorId = PlayerColorId | 'neutral'`; `PLAYER_COLORS.neutral`
+  (grey, emblem `'dash'`, ΔE ≥ 9.8 against all six) — the controller repaints the neutral seat's colour
+  to it until `PlayerColorId` grows the id. `PLAYER_COLOR_IDS` stays the six pickable colours.
+- **`src/game/viewModel.ts`** (Board + Surfaces):
+  - `GameVM.round?`, `GameVM.events?` (the dock's ledger lines), `GameVM.updateReady?` ("Update ready ·
+    reload"); `SeatChipVM.armies? / cards? / continents?` (table cues), `SeatChipVM.neutral? / personality? /
+    grudge? / truceTarget?`; `LogLineVM.kind` gains `'truce'`; `ButtonId` gains `'truce' | 'acceptTruce' |
+    'declineTruce'` (Accept is the strip's primary, so the one gold).
+  - New game: `SeatDraft.personality?`, `HouseRulesDraft.neutral? / truces?` (default on),
+    `NewGameVM.maps? / mapId? / personalities? / neutralApplies? / trucesApply?`.
+  - `UiIntent`: `{ type: 'map'; id }`, `{ type: 'proposeTruce'; to }`, `{ type: 'reloadForUpdate' }`.
+  - Test hooks: `RiskHooks.ledger()`, `RiskHooks.map()` (the booted pack).

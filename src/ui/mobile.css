@@ -108,6 +108,7 @@
 .form-phone .sc-name { font-size: 1.0625rem; }
 .form-phone .sc-emb { display: none; }
 .form-phone .sc-by { display: none; }
+.form-phone .sc-pers { display: none; } /* phones: the personality is the chip's title only */
 .form-phone .ts-right { position: relative; gap: 6px; }
 .form-phone .ts-menu { width: 2.75rem; height: 2.75rem; }
 .form-phone .ts-reset { height: 2.75rem; padding: 0 0.6rem; font-size: 1rem; }
@@ -326,7 +327,7 @@
 .form-phone .ng-grid > .ng-label { padding-top: 0.9rem; }
 .form-phone .ng-grid > .ng-label:empty, .form-phone .ng-grid > div:empty { display: none; }
 .form-phone .seat-row {
-  grid-template-columns: 2.9rem minmax(0, 1fr) minmax(0, 1fr) 2.75rem; grid-template-areas: 'emb name name rm' 'kind kind diff diff';
+  grid-template-columns: 2.9rem minmax(0, 1fr) minmax(0, 1fr) 2.75rem; grid-template-areas: 'emb name name rm' 'kind kind diff diff' 'pers pers pers pers';
   gap: 0.2rem 0.75rem; padding: 0.55rem 0 0.5rem;
 }
 .form-phone .seat-num { display: none; }
@@ -337,6 +338,14 @@
 .form-phone .seat-row .seg { flex-wrap: nowrap; gap: 1rem; align-items: center; }
 .form-phone .seat-row .seg-opt { min-height: 2.75rem; font-size: 1.125rem; justify-content: center; }
 .form-phone .seat-row .remove-seat { grid-area: rm; }
+.form-phone .seat-row > .pers-wrap { grid-area: pers; }
+.form-phone .seat-row > .pers-wrap.off { display: none; }
+.form-phone .seat-row.has-pers { padding-bottom: 0.5rem; }
+.form-phone .pers-line { position: static; display: block; margin-top: -0.35rem; margin-left: 0 !important; white-space: normal; }
+.form-phone .map-picker { grid-auto-flow: row; gap: 0.6rem; }
+.form-phone .map-opt { grid-template-columns: 7rem minmax(0, 1fr); gap: 0.75rem; }
+.form-phone .map-thumb { width: 7rem; }
+.form-phone .map-name { font-size: 1.1875rem; }
 .form-phone .add-seat { height: 2.75rem; margin-top: 0.1rem; }
 .form-phone .seg-cards { gap: 1rem; }
 .form-phone .seg-cards .seg-label { font-size: 1.1875rem; }
@@ -352,7 +361,8 @@
 .form-phone .ng-summary { font-size: 1.0625rem; color: var(--ivory-70); }
 .form-phone .ng-foot .btn.big { width: 100%; min-width: 0; height: 3.25rem; font-size: 1.3125rem; }
 /* Landscape: one-line seat rows fit; the footer is one row */
-.form-phone.landscape .seat-row { grid-template-columns: 2.9rem minmax(6rem, 1fr) auto minmax(0, 13rem) 2.75rem; grid-template-areas: 'emb name kind diff rm'; padding: 0.25rem 0; }
+.form-phone.landscape .seat-row { grid-template-columns: 2.9rem minmax(6rem, 1fr) auto minmax(0, 13rem) 2.75rem; grid-template-areas: 'emb name kind diff rm' '. pers pers pers pers'; padding: 0.25rem 0; }
+.form-phone.landscape .map-picker { grid-auto-flow: column; }
 .form-phone.landscape .ng-foot { flex-direction: row; align-items: center; padding-top: 0.5rem; padding-bottom: calc(var(--sa-b) + 0.5rem); }
 .form-phone.landscape .ng-sum { align-items: flex-start; text-align: left; flex: 1; }
 .form-phone.landscape .ng-foot .btn.big { width: auto; min-width: 11rem; height: 2.875rem; }

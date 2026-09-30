@@ -11,16 +11,22 @@
 // and slides to the next seat when the turn passes (cup.ts). The ring keeps one numeral, territories: the
 // win condition counts them, and a second numeral per seat read as clutter; the army read is the board's
 // stack heights (the seat's total is in its label for screen readers).
+// v3 AI (quietly): an AI seat's personality in small caps under its name (desktop; phones keep it in the
+// ring's title), and, when it holds a grudge of 2 or more, one short slanted brush tick under its ring in
+// the grudged seat's colour ('Holds a grudge against Sam'). The 2-player neutral seat is a dimmed ring
+// with its count and no name underline; the cup never goes to it. Choosing a truce partner lights the
+// rings that can take one (the others step back); a tap on a lit ring offers the truce.
 
 import type { SeatChipVM, UiIntent } from '../../game/viewModel';
 import { PLAYER_COLORS, continentInk } from '../../shared/palette';
 import { CONTINENT_IDS, CONTINENTS } from '../../engine/mapData';
 import { brushMark } from '../../shared/enso';
 import { Cup } from './cup';
-import { drawIn, emblem, ensoEl, h, hashSeed, motion, pop, setEmblem, setEnso, setStyle, setText, toggle } from '../dom';
+import { drawIn, emblem, ensoEl, h, hashSeed, motion, pop, ringEl, setEmblem, setEnso, setStyle, setText, toggle } from '../dom';
 
 class Chip {
   readonly el: HTMLDivElement;
+  private pers: HTMLSpanElement;
   private ring: HTMLSpanElement;
   private mark: SVGSVGElement;
   private emb: SVGSVGElement;
@@ -31,12 +37,26 @@ class Chip {
   private marksKey = '';
   private vm: SeatChipVM | null = null;
 
-  constructor() {
+  constructor(send: (i: UiIntent) => void) {
     this.el = h('div', 'seat-chip');
+    // A lit ring (choosing a truce partner) is a button: a tap offers the truce.
+    this.el.addEventListener('click', () => {
+      const vm = this.vm;
+      if (vm?.truceTarget) send({ type: 'proposeTruce', to: vm.seat.id });
+    });
+    this.el.addEventListener('keydown', (e) => {
+      const vm = this.vm;
+      if (!vm?.truceTarget || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      send({ type: 'proposeTruce', to: vm.seat.id });
+    });
     this.ring = h('span', 'sc-ring');
     this.mark = ensoEl(1, 'sc-enso', { small: true });
     this.terr = h('span', 'sc-terr num');
-    this.ring.append(this.mark, this.terr, h('i', 'sc-crack'));
+    // The lit ring while a truce partner is chosen: a second, finer brush ring round the seat's (ivory).
+    const halo = ringEl(hashSeed('sc-halo'), 1, undefined, { cls: 'sc-halo', weight: 0.8 });
+    this.ring.append(this.mark, this.terr, h('i', 'sc-crack'), halo);
     this.marks = h('span', 'sc-marks');
     const col = h('span', 'sc-col');
     col.append(this.ring, this.marks);
@@ -44,9 +64,10 @@ class Chip {
     this.emb = emblem('crimson', 'emb sc-emb');
     this.name = h('span', 'sc-name');
     this.by = h('span', 'sc-by hidden');
+    this.pers = h('span', 'sc-pers hidden');
     const nm = h('span', 'sc-nameline');
     nm.append(this.emb, this.name);
-    text.append(nm, this.by);
+    text.append(nm, this.by, this.pers);
     this.el.append(col, text);
   }
 
@@ -61,19 +82,37 @@ class Chip {
     setEmblem(this.emb, vm.seat.color, 'light');
     setText(this.name, vm.seat.name);
     setText(this.terr, vm.eliminated ? '' : String(vm.territories));
-    toggle(this.el, 'current', vm.current);
+    toggle(this.el, 'current', vm.current && !vm.neutral);
     toggle(this.el, 'out', vm.eliminated);
+    toggle(this.el, 'neutral', !!vm.neutral);
+    const pers = !vm.eliminated && vm.personality ? vm.personality : null;
+    toggle(this.pers, 'hidden', !pers);
+    setText(this.pers, pers?.name ?? '');
+    // Phones hide the word: the ring's title carries it (hover / long-press).
+    this.el.title = pers ? `${pers.name} · ${pers.line}` : '';
+    this.el.dataset.personality = pers?.name.toLowerCase() ?? '';
+    const lit = !!vm.truceTarget;
+    toggle(this.el, 'truce-target', lit);
+    if (lit) {
+      this.el.setAttribute('role', 'button');
+      this.el.tabIndex = 0;
+      this.el.setAttribute('aria-label', `Offer ${vm.seat.name} a truce`);
+    } else if (this.el.getAttribute('role')) {
+      this.el.removeAttribute('role');
+      this.el.removeAttribute('tabindex');
+    }
+    if (lit && !prev?.truceTarget) drawIn(this.ring, 240);
     const out = vm.eliminated ? vm.out : null;
     toggle(this.by, 'hidden', !out);
     if (out) setText(this.by, `taken by ${out.by.name}`);
     this.el.dataset.testid = `seat-${vm.seat.id}`;
     this.updateMarks(vm);
     const held = (vm.continents ?? []).map((c) => CONTINENTS[c].name);
-    this.el.setAttribute(
+    if (!lit) this.el.setAttribute(
       'aria-label',
       vm.eliminated
         ? `${vm.seat.name}, out${out ? `, taken by ${out.by.name}` : ''}`
-        : `${vm.seat.name}: ${vm.territories} territories${vm.armies !== undefined ? `, ${vm.armies} armies` : ''}${held.length ? `, holds ${held.join(' and ')}` : ''}${vm.cards ? `, ${vm.cards} ${vm.cards === 1 ? 'card' : 'cards'}` : ''}`,
+        : `${vm.seat.name}${pers ? `, ${pers.name}` : ''}: ${vm.territories} territories${vm.armies !== undefined ? `, ${vm.armies} armies` : ''}${held.length ? `, holds ${held.join(' and ')}` : ''}${vm.cards ? `, ${vm.cards} ${vm.cards === 1 ? 'card' : 'cards'}` : ''}${vm.grudge ? `, holds a grudge against ${vm.grudge.name}` : ''}`,
     );
     if (!prev) return;
     // Turn start (INK B4 "seat ring inks"): the ring is brushed in fresh ivory ink and dries into its wash
@@ -93,14 +132,25 @@ class Chip {
       this.ring.animate([{ opacity: 1, filter: 'saturate(1)' }, { opacity: 0.4, filter: 'saturate(0.2)' }], { duration: motion.reduced ? 150 : 1200, easing: 'cubic-bezier(0.3, 0, 0.4, 1)' });
   }
 
-  /** Under the ring: a tick per held continent (in its printed tint), then the card count. */
+  /** Under the ring: a tick per held continent (in its printed tint), then the card count; an AI's grudge tick first. */
   private updateMarks(vm: SeatChipVM): void {
     const conts = vm.eliminated ? [] : (vm.continents ?? []);
     const cards = vm.eliminated ? 0 : (vm.cards ?? 0);
-    const key = `${conts.join(',')}|${cards}`;
+    const grudge = vm.eliminated ? null : (vm.grudge ?? null);
+    const key = `${conts.join(',')}|${cards}|${grudge ? `${grudge.id}:${grudge.color}:${grudge.name}` : ''}`;
     if (key === this.marksKey) return;
     this.marksKey = key;
     this.marks.textContent = '';
+    if (grudge) {
+      // one short brush tick, slanted (a continent's tick stands upright), in the grudged seat's colour
+      const g = h('span', 'sc-tick sc-grudge');
+      g.dataset.testid = `seat-grudge-${vm.seat.id}`;
+      g.dataset.against = String(grudge.id);
+      g.title = `Holds a grudge against ${grudge.name}`;
+      g.style.color = PLAYER_COLORS[grudge.color].light;
+      g.innerHTML = `<svg viewBox="0 0 6 12" aria-hidden="true"><path d="${brushMark([[4.6, 1.2], [1.5, 10.8]], { seed: 71 + grudge.id * 5, width: 2.8 })}" fill="currentColor"/></svg>`;
+      this.marks.append(g);
+    }
     for (const c of conts) {
       const i = CONTINENT_IDS.indexOf(c);
       const t = h('span', 'sc-tick');
@@ -140,7 +190,7 @@ export class TopStrip {
   private cup = new Cup();
   private cupSeat = -1;
 
-  constructor(send: (i: UiIntent) => void) {
+  constructor(private send: (i: UiIntent) => void) {
     this.el = h('header', 'topstrip');
     this.el.dataset.testid = 'topstrip';
     this.seats = h('div', 'ts-seats');
@@ -173,12 +223,14 @@ export class TopStrip {
     if (this.vm === vm) return;
     this.vm = vm;
     while (this.chips.length < vm.length) {
-      const c = new Chip();
+      const c = new Chip(this.send);
       this.chips.push(c);
       this.seats.append(c.el);
     }
     while (this.chips.length > vm.length) this.chips.pop()!.el.remove();
     vm.forEach((c, i) => this.chips[i].update(c));
+    // Choosing a truce partner: the lit rings stand out, the rest step back.
+    toggle(this.seats, 'picking', vm.some((c) => c.truceTarget));
     this.placeCup(false);
   }
 
@@ -186,7 +238,7 @@ export class TopStrip {
   private placeCup(cut: boolean): void {
     const vm = this.vm;
     if (!vm) return;
-    const i = vm.findIndex((c) => c.current);
+    const i = vm.findIndex((c) => c.current && !c.neutral);
     toggle(this.cup.el, 'hidden', i < 0);
     if (i < 0) return;
     const chip = this.chips[i];

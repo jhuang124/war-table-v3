@@ -374,7 +374,7 @@ export const mountUi: MountUi = (host, api) => {
       if (g.banner && g.banner.id !== prev?.game?.banner?.id && sayInSlot()) strip.setLineAside(true);
       // Once the world is held nothing on the track is 'now': the gold leaves it for the victory beat.
       strip.update(stripFor(g), worldHolder(g) ? null : g.gold);
-      strip.setEvents(g.events, g.round);
+      strip.setEvents(g.events, g.round, !!g.updateReady);
       // Ambient motion yields to the strike (INK A1): the rule's glint and breath rest while dice roll.
       toggle(root, 'is-striking', !!g.battle?.rolling);
       // The cup pours as the dice leave it (PLAN §2): toward the ink ring, under the fight header.

@@ -6,7 +6,7 @@
 // (Sea lanes are ink dabs in the ink layer now; dust and ripple rings are cut.)
 import * as THREE from 'three';
 import type { TerritoryId } from '../engine/types';
-import { seaLaneBetween } from '../map';
+import { BOARD, seaLaneBetween } from '../map';
 import { Animator, ease, type Run } from './anim';
 import { loadTexmap } from './texmaps';
 import { GOLD, IVORY, TILE_TOP, hexToRgb, toWorld, type RGB } from './util';
@@ -382,16 +382,18 @@ export class AttackArrow {
       // the paper at the edge (never a bar across the board).
       wrapped = true;
       const [s1, s2] = lane.segments;
+      // the board's centre line (board units), from the booted pack's geometry
+      const mid = BOARD.width / 2;
       const edgeOf = (seg: typeof s1) => {
         const p0 = seg[0];
         const p1 = seg[seg.length - 1];
-        return Math.abs(p0[0] - 50) > Math.abs(p1[0] - 50) ? p0 : p1;
+        return Math.abs(p0[0] - mid) > Math.abs(p1[0] - mid) ? p0 : p1;
       };
       const e1 = edgeOf(s1);
       const e2 = edgeOf(s2);
-      const [ea, eb] = Math.sign(e1[0] - 50) === Math.sign(A.x) ? [e1, e2] : [e2, e1];
-      const EA = toWorld(ea[0] + Math.sign(ea[0] - 50) * 0.6, ea[1], STROKE_Y);
-      const EB = toWorld(eb[0] + Math.sign(eb[0] - 50) * 0.6, eb[1], STROKE_Y);
+      const [ea, eb] = Math.sign(e1[0] - mid) === Math.sign(A.x) ? [e1, e2] : [e2, e1];
+      const EA = toWorld(ea[0] + Math.sign(ea[0] - mid) * 0.6, ea[1], STROKE_Y);
+      const EB = toWorld(eb[0] + Math.sign(eb[0] - mid) * 0.6, eb[1], STROKE_Y);
       const A2 = A.clone().lerp(EA, Math.min(0.3, 0.75 / Math.max(1, A.distanceTo(EA))));
       const B2 = B.clone().lerp(EB, Math.min(0.36, 1.45 / Math.max(1, B.distanceTo(EB))));
       // both arcs bow the same way on screen (north), so the pair reads as one stroke over the edge

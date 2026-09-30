@@ -63,6 +63,10 @@ export const FLOWS: Record<string, FlowSpec> = {
   },
   squint: { lane: 'logic', why: 'v3 squint guard: at 30 % scale, the five tallest stacks and the continent outlines out-contrast the washes (numbers reported)' },
   pwa: { lane: 'logic', why: 'manifest, service worker, offline boot (its own production build and server)' },
+  surfaces: {
+    lane: 'logic',
+    why: 'v3 surfaces: the map picker and a game started and resumed on True World, AI personalities and grudges in the strip, a scripted AI → human truce offer (Accept / Decline, one gold per sampled frame), the grey neutral seat, "Update ready", True World stones clear of numerals and land',
+  },
 };
 
 export type Speed = 'instant' | 'real';
